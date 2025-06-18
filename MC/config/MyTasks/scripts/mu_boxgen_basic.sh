@@ -1,0 +1,1 @@
+o2-sim -n 100000 -g fwmugen -j 10 -m HALL MAG DIPO COMP PIPE ABSO SHIL MCH MID
