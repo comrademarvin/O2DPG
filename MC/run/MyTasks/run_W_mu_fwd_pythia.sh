@@ -11,11 +11,11 @@ export ALICEO2_CCDB_LOCALCACHE=$PWD/.ccdb
 . ${O2_ROOT}/share/scripts/jobutils.sh
 
 NSIGEVENTS=100
-NWORKERS=100
+NWORKERS=20
 NTIMEFRAMES=1
 
 ${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py -eCM 5360 -seed 12345 -col pp -gen pythia8 -j ${NWORKERS} -ns ${NSIGEVENTS} -tf ${NTIMEFRAMES} -e TGeant4 \
-    -interactionRate 500000 -run 559387 -mod "--skipModules ZDC" \
+    -interactionRate 500000 -run 559361 --readoutDets MFT,MCH,MID,ITS \
 	-confKey "GeneratorPythia8.config=/home/stephan/alice/O2DPG/MC/config/MyTasks/pythia8/pythia_W_mu.cfg;GeneratorPythia8.includePartonEvent=true"
     #-trigger "external" -ini /home/stephan/alice/O2DPG/MC/config/MyTasks/ini/trigger_W_mu_pythia.ini \
 
