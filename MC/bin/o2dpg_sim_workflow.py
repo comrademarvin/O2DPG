@@ -45,6 +45,9 @@ from o2dpg_qc_finalization_workflow import include_all_QC_finalization
 from o2dpg_sim_config import create_sim_config, create_geant_config, constructConfigKeyArg, option_if_available, overwrite_config
 from o2dpg_dpl_config_tools import parse_command_string, modify_dpl_command, dpl_option_from_config, TaskFinalizer
 
+# for some JAliEn interaction
+from alienpy.alien import JAlien
+
 parser = argparse.ArgumentParser(description='Create an ALICE (Run3) MC simulation workflow')
 
 # the run-number of data taking or default if unanchored
@@ -994,6 +997,9 @@ for tf in range(1, NTIMEFRAMES + 1):
 
    tpcLocalCF={"DigiParams.maxOrbitsToDigitize" : str(orbitsPerTF), "DigiParams.seed" : str(TFSEED)}
 
+   # force TPC common mode correction in all cases to avoid issues the CMk values stored in the CCDB
+   tpcLocalCF['TPCEleParam.DigiMode'] = str(2) # 2 = o2::tpc::DigitzationMode::ZeroSuppressionCMCorr from TPCBase/ParameterElectronics.h
+
    # handle distortions and scaling using MC maps
    # this assumes the lumi inside the maps is stored in FT0 (pp) scalers
    # in case of PbPb the conversion factor ZDC ->FT0 (pp) must be taken into account in the scalers
@@ -1125,6 +1131,7 @@ for tf in range(1, NTIMEFRAMES + 1):
    # reco
    # -----------
    tpcreconeeds=[FT0FV0EMCCTPDIGItask['name']]
+   tpcclusterneed=[TPCDigitask['name'], FT0FV0EMCCTPDIGItask['name']]
    if not args.combine_tpc_clusterization:
      # We treat TPC clusterization in multiple (sector) steps in order to
      # stay within the memory limit or to parallelize over sector from outside (not yet supported within cluster algo)
@@ -1133,10 +1140,10 @@ for tf in range(1, NTIMEFRAMES + 1):
      for s in range(0,35,sectorpertask):
        taskname = 'tpcclusterpart' + str((int)(s/sectorpertask)) + '_' + str(tf)
        tpcclustertasks.append(taskname)
-       tpcclussect = createTask(name=taskname, needs=[TPCDigitask['name']], tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu='2', mem='8000')
+       tpcclussect = createTask(name=taskname, needs=tpcclusterneed, tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu='2', mem='8000')
        digitmergerstr = '${O2_ROOT}/bin/o2-tpc-chunkeddigit-merger --tpc-sectors ' + str(s)+'-'+str(s+sectorpertask-1) + ' --tpc-lanes ' + str(NWORKERS_TF) + ' | '
        tpcclussect['cmd'] = (digitmergerstr,'')[args.no_tpc_digitchunking] + ' ${O2_ROOT}/bin/o2-tpc-reco-workflow ' + getDPL_global_options(bigshm=True) + ' --input-type ' + ('digitizer','digits')[args.no_tpc_digitchunking] + ' --output-type clusters,send-clusters-per-sector --tpc-native-cluster-writer \" --outfile tpc-native-clusters-part'+ str((int)(s/sectorpertask)) + '.root\" --tpc-sectors ' + str(s)+'-'+str(s+sectorpertask-1) + ' ' + putConfigValues(["GPU_global"], {"GPU_proc.ompThreads" : 4}) + ('',' --disable-mc')[args.no_mc_labels]
-       tpcclussect['env'] = { "OMP_NUM_THREADS" : "4" }
+       tpcclussect['env'] = { "OMP_NUM_THREADS" : "4" , "TBB_NUM_THREADS" : "4" }
        tpcclussect['semaphore'] = "tpctriggers.root"
        tpcclussect['retry_count'] = 2  # the task has a race condition --> makes sense to retry
        workflow['stages'].append(tpcclussect)
@@ -1146,7 +1153,7 @@ for tf in range(1, NTIMEFRAMES + 1):
      workflow['stages'].append(TPCCLUSMERGEtask)
      tpcreconeeds.append(TPCCLUSMERGEtask['name'])
    else:
-     tpcclus = createTask(name='tpccluster_' + str(tf), needs=[TPCDigitask['name']], tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu=NWORKERS_TF, mem='2000')
+     tpcclus = createTask(name='tpccluster_' + str(tf), needs=tpcclusterneed, tf=tf, cwd=timeframeworkdir, lab=["RECO"], cpu=NWORKERS_TF, mem='2000')
      tpcclus['cmd'] = '${O2_ROOT}/bin/o2-tpc-chunkeddigit-merger --tpc-lanes ' + str(NWORKERS_TF)
      tpcclus['cmd'] += ' | ${O2_ROOT}/bin/o2-tpc-reco-workflow ' + getDPL_global_options() + ' --input-type digitizer --output-type clusters,send-clusters-per-sector ' + putConfigValues(["GPU_global","TPCGasParam","TPCCorrMap"],{"GPU_proc.ompThreads" : 1}) + ('',' --disable-mc')[args.no_mc_labels]
      workflow['stages'].append(tpcclus)
@@ -1577,6 +1584,18 @@ for tf in range(1, NTIMEFRAMES + 1):
 
    aod_df_id = '{0:03}'.format(tf)
 
+   import os
+   aod_creator = os.getenv("JALIEN_USER")
+   if aod_creator == None:
+      # we use JAliEn to determine the user and capture it's output into a variable via redirect_stdout
+      import io
+      from contextlib import redirect_stdout
+      f = io.StringIO()
+      with redirect_stdout(f):
+         if JAlien(['whoami']) == 0:
+            aod_creator = f.getvalue().strip()
+            print (f"Determined GRID username {aod_creator}")
+
    AODtask = createTask(name='aod_'+str(tf), needs=aodneeds, tf=tf, cwd=timeframeworkdir, lab=["AOD"], mem='4000', cpu='1')
    AODtask['cmd'] = ('','ln -nfs ../bkg_Kine.root . ;')[doembedding]
    AODtask['cmd'] += '[ -f AO2D.root ] && rm AO2D.root; '  
@@ -1589,9 +1608,10 @@ for tf in range(1, NTIMEFRAMES + 1):
       f"--run-number {args.run}",
       getDPL_global_options(bigshm=True),
       f"--info-sources {aodinfosources}",
-      "--lpmp-prod-tag ${ALIEN_JDL_LPMPRODUCTIONTAG:-unknown}",
+      f"--lpmp-prod-tag {args.productionTag}",
       "--anchor-pass ${ALIEN_JDL_LPMANCHORPASSNAME:-unknown}",
-      "--anchor-prod ${ALIEN_JDL_LPMANCHORPASSNAME:-unknown}",
+      "--anchor-prod ${ALIEN_JDL_LPMANCHORPRODUCTION:-unknown}",
+      f"--created-by {aod_creator}",
       "--combine-source-devices" if not args.no_combine_dpl_devices else "",
       "--disable-mc" if args.no_mc_labels else "",
       "--enable-truncation 0" if environ.get("O2DPG_AOD_NOTRUNCATE") or environ.get("ALIEN_JDL_O2DPG_AOD_NOTRUNCATE") else "",

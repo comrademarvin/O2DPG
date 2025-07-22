@@ -17,6 +17,15 @@ import pandas as pd
 import subprocess
 import shlex
 
+# hack to find the script for meta upload
+o2dpg_root = os.environ.get("O2DPG_ROOT")
+if o2dpg_root is None:
+  raise EnvironmentError("O2DPG_ROOT is not set in the environment.")
+mc_prodinfo_path = os.path.abspath(os.path.join(o2dpg_root, "MC", "prodinfo"))
+sys.path.append(mc_prodinfo_path)
+from mcprodinfo_ccdb_upload import MCProdInfo, upload_mcprodinfo_meta, query_mcprodinfo
+import dataclasses
+
 # Creates a time anchored MC workflow; positioned within a given run-number (as function of production size etc)
 
 # Example:
@@ -249,21 +258,45 @@ def retrieve_MinBias_CTPScaler_Rate(ctpscaler, finaltime, trig_eff_arg, NBunches
     and calculates the interation rate to be applied in Monte Carlo digitizers.
     Uses trig_eff_arg when positive, otherwise calculates the effTrigger.
     """
+    trigger_effs = {
+        "pp": {
+            "1000": 0.68,
+            "6000": 0.737,
+            "default": 0.759
+        },
+        "pO": {
+            "default": 0.8222
+        },
+        "Op": {
+            "default": 0.8222
+        },
+        "OO": {
+            "default": 0.8677
+        },
+        "NeNe": {
+            "default": 0.9147
+        },
+        "PbPb": {
+            "default": 28.0  # this is ZDC
+        }
+    }
 
     # determine first of all the trigger efficiency
     effTrigger = trig_eff_arg
     if effTrigger < 0:
-      if ColSystem == "pp":
-        if eCM < 1000:
-          effTrigger = 0.68
-        elif eCM < 6000:
-          effTrigger = 0.737
+      # Check if ColSystem is defined in trigger_effs
+      if ColSystem in trigger_effs:
+        if ColSystem == "pp":
+          if eCM < 1000:
+            effTrigger = trigger_effs["pp"]["1000"]
+          elif eCM < 6000:
+            effTrigger = trigger_effs["pp"]["6000"]
+          else:
+            effTrigger = trigger_effs["pp"]["default"]
         else:
-          effTrigger = 0.759
-      elif ColSystem == "PbPb":
-        effTrigger = 28.0 # this is ZDC
+          effTrigger = trigger_effs[ColSystem]["default"]
       else:
-        effTrigger = 0.759
+        effTrigger = 0.759  # The simulation will fail later if the collision system is not defined
 
     # this is the default for pp
     ctpclass = 0 # <---- we take the scaler for FT0
@@ -417,6 +450,16 @@ def exclude_timestamp(ts, orbit, run, filename, global_run_params):
     print(f"This run as globally {total_excluded_fraction} of it's data marked to be exluded")
     return excluded
 
+def publish_MCProdInfo(mc_prod_info, ccdb_url = "https://alice-ccdb.cern.ch", username = "aliprod", include_meta_into_aod=False):
+   print("Publishing MCProdInfo")
+
+   # see if this already has meta-data uploaded, otherwise do nothing
+   mc_prod_info_q = query_mcprodinfo(ccdb_url, username, mc_prod_info.RunNumber, mc_prod_info.LPMProductionTag)
+   if mc_prod_info_q == None:
+    # could make this depend on hash values in future
+    upload_mcprodinfo_meta(ccdb_url, username, mc_prod_info.RunNumber, mc_prod_info.LPMProductionTag, dataclasses.asdict(mc_prod_info))
+
+
 def main():
     parser = argparse.ArgumentParser(description='Creates an O2DPG simulation workflow, anchored to a given LHC run. The workflows are time anchored at regular positions within a run as a function of production size, split-id and cycle.')
 
@@ -431,6 +474,7 @@ def main():
     parser.add_argument("--run-time-span-file", type=str, dest="run_span_file", help="Run-time-span-file for exclusions of timestamps (bad data periods etc.)", default="")
     parser.add_argument("--invert-irframe-selection", action='store_true', help="Inverts the logic of --run-time-span-file")
     parser.add_argument("--orbitsPerTF", type=str, help="Force a certain orbits-per-timeframe number; Automatically taken from CCDB if not given.", default="")
+    parser.add_argument('--publish-mcprodinfo', action='store_true', default=False, help="Publish MCProdInfo metadata to CCDB")
     parser.add_argument('forward', nargs=argparse.REMAINDER) # forward args passed to actual workflow creation
     args = parser.parse_args()
     print (args)
@@ -461,21 +505,34 @@ def main():
 
     # determine some fundamental physics quantities
     eCM = grplhcif.getSqrtS()
+    eA = grplhcif.getBeamEnergyPerNucleonInGeV(o2.constants.lhc.BeamDirection.BeamC)
+    eB = grplhcif.getBeamEnergyPerNucleonInGeV(o2.constants.lhc.BeamDirection.BeamA)
     A1 = grplhcif.getAtomicNumberB1()
     A2 = grplhcif.getAtomicNumberB2()
 
     # determine collision system and energy
-    print ("Determined eMC ", eCM)
+    print ("Determined eCM ", eCM)
+    print ("Determined eA ", eA)
+    print ("Determined eB ", eB)
     print ("Determined atomic number A1 ", A1)
     print ("Determined atomic number A2 ", A2)
     ColSystem = ""
-    if A1 == 82 and A2 == 82:
-      ColSystem = "PbPb"
-    elif A1 == 1 and A2 == 1:
-      ColSystem = "pp"
-    else:
-      print ("Unknown collision system ... exiting")
-      exit (1)
+    col_systems = {
+        "pp": (1, 1),
+        "pO": (1, 8),
+        "Op": (8, 1),
+        "OO": (8, 8),
+        "NeNe": (10, 10),
+        "PbPb": (82, 82)
+    }
+    # check if we have a known collision system
+    for system, (a1, a2) in col_systems.items():
+        if A1 == a1 and A2 == a2:
+            ColSystem = system
+            break
+    if ColSystem == "":
+        print(f"ERROR: Unknown collision system for A1={A1}, A2={A2}. Check the GRPLHCIF object.")
+        exit(1)
 
     print ("Collision system ", ColSystem)
 
@@ -535,8 +592,9 @@ def main():
     # we finally pass forward to the unanchored MC workflow creation
     # TODO: this needs to be done in a pythonic way clearly
     # NOTE: forwardargs can - in principle - contain some of the arguments that are appended here. However, the last passed argument wins, so they would be overwritten.
+    energyarg = (" -eCM " + str(eCM)) if A1 == A2 else (" -eA " + str(eA) + " -eB " + str(eB))
     forwardargs += " -tf " + str(args.tf) + " --sor " + str(run_start) + " --timestamp " + str(timestamp) + " --production-offset " + str(prod_offset) + " -run " + str(args.run_number) + " --run-anchored --first-orbit "       \
-                   + str(GLOparams["FirstOrbit"]) + " -field ccdb -bcPatternFile ccdb" + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + " -eCM " + str(eCM)
+                   + str(GLOparams["FirstOrbit"]) + " -field ccdb -bcPatternFile ccdb" + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + str(energyarg)
     if not '--readoutDets' in forwardargs:
        forwardargs += ' --readoutDets ' + GLOparams['detList']
     print ("forward args ", forwardargs)
@@ -547,11 +605,28 @@ def main():
     else:
       print ("Creating time-anchored workflow...")
       print ("Executing: " + cmd)
-      # os.system(cmd)
       try:
         cmd_list = shlex.split(os.path.expandvars(cmd))
         output = subprocess.check_output(cmd_list, text=True, stdin=subprocess.DEVNULL, timeout = 120)
         print (output)
+
+        # when we get here, we can publish info about the production (optionally)
+        if args.publish_mcprodinfo == True or os.getenv("PUBLISH_MCPRODINFO") != None:
+          prod_tag = os.getenv("ALIEN_JDL_LPMPRODUCTIONTAG")
+          grid_user_name = os.getenv("JALIEN_USER")
+          mcprod_ccdb_server = os.getenv("PUBLISH_MCPRODINFO_CCDBSERVER")
+          if mcprod_ccdb_server == None:
+            mcprod_ccdb_server = "https://alice-ccdb.cern.ch"
+          if prod_tag != None and grid_user_name != None:
+            info = MCProdInfo(LPMProductionTag = prod_tag,
+                              Col = ColSystem,
+                              IntRate =rate,
+                              RunNumber = args.run_number,
+                              OrbitsPerTF = GLOparams["OrbitsPerTF"])
+            publish_MCProdInfo(info, username = grid_user_name, ccdb_url = mcprod_ccdb_server)
+          else:
+            print("No production tag or GRID user name known. Not publishing MCProdInfo")
+
       except subprocess.CalledProcessError as e:
         print(f"Command failed with return code {e.returncode}")
         print("Output:")

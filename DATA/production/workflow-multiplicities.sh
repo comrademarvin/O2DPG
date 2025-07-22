@@ -91,7 +91,7 @@ if [[ ! -z ${OPTIMIZED_PARALLEL_ASYNC:-} ]]; then
     NTRDTRKTHREADS=3
     ITSTRK_THREADS=2
     ITSTPC_THREADS=2
-  elif [[ $OPTIMIZED_PARALLEL_ASYNC == "pp_4gpu" ]]; then
+  elif [[ $OPTIMIZED_PARALLEL_ASYNC =~ ^pp_4gpu(_|$) ]]; then
     if [[ -z ${TIMEFRAME_RATE_LIMIT:-} ]]; then
       if [[ ! -z ${ALIEN_JDL_LPMANCHORYEAR} && ${ALIEN_JDL_LPMANCHORYEAR} -lt 2023 ]]; then
         TIMEFRAME_RATE_LIMIT=45
@@ -100,13 +100,18 @@ if [[ ! -z ${OPTIMIZED_PARALLEL_ASYNC:-} ]]; then
       fi
     fi
     [[ -z ${SHMSIZE:-} ]] && SHMSIZE=100000000000
+    if [[ $OPTIMIZED_PARALLEL_ASYNC == "pp_4gpu_NERSC" ]]; then
+      NGPUS=1
+      GPUTYPE=CUDA
+    else
+      NGPUS=4
+    fi
     NGPURECOTHREADS=8
     NTRDTRKTHREADS=2
     ITSTRK_THREADS=2
     ITSTPC_THREADS=2
     SVERTEX_THREADS=4
     TPCTIMESERIES_THREADS=2
-    NGPUS=4
     N_TPCTRK=4
     N_FWDMATCH=2
     N_PRIMVTXMATCH=1
@@ -123,11 +128,16 @@ if [[ ! -z ${OPTIMIZED_PARALLEL_ASYNC:-} ]]; then
     N_ITSTRK=12
     N_ITSCL=2
     export DPL_SMOOTH_RATE_LIMITING=1
-  elif [[ $OPTIMIZED_PARALLEL_ASYNC == "PbPb_4gpu" ]]; then
+  elif [[ $OPTIMIZED_PARALLEL_ASYNC =~ ^PbPb_4gpu(_|$) ]]; then
     [[ -z ${TIMEFRAME_RATE_LIMIT:-} ]] && TIMEFRAME_RATE_LIMIT=35
     [[ -z ${SHMSIZE:-} ]] && SHMSIZE=100000000000 # SHM_LIMIT 3/4
     [[ -z ${TIMEFRAME_SHM_LIMIT:-} ]] && TIMEFRAME_SHM_LIMIT=$(($SHMSIZE / 3))
-    NGPUS=4
+    if [[ $OPTIMIZED_PARALLEL_ASYNC == "PbPb_4gpu_NERSC" ]]; then
+      NGPUS=1
+      GPUTYPE=CUDA
+    else
+      NGPUS=4
+    fi
     NGPURECOTHREADS=8
     NTRDTRKTHREADS=8
     ITSTRK_THREADS=5
@@ -176,7 +186,7 @@ elif [[ $EPNPIPELINES != 0 ]]; then
   ITSTRK_THREADS=2
   ITSTPC_THREADS=2
   # Tuned multiplicities for sync pp / Pb-Pb processing
-  if [[ $BEAMTYPE == "pp" ]]; then
+  if [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]]; then
     N_ITSRAWDEC=$(math_max $((6 * $EPNPIPELINES * $NGPUS / 4)) 1)
     N_MFTRAWDEC=$(math_max $((2 * $EPNPIPELINES * $NGPUS / 4)) 1)
     if [[ "${GEN_TOPO_AUTOSCALE_PROCESSES:-}" == "1" && $RUNTYPE == "PHYSICS" ]]; then
@@ -219,7 +229,7 @@ elif [[ $EPNPIPELINES != 0 ]]; then
     N_ITSRAWDEC=$(math_max $((3 * 60 / $RECO_NUM_NODES_WORKFLOW_CMP)) ${N_ITSRAWDEC:-1}) # This means, if we have 60 EPN nodes, we need at least 3 ITS RAW decoders (will be scaled down by a factor of two automatically if we have 2 NUMA domains)
     N_MFTRAWDEC=$(math_max $((3 * 60 / $RECO_NUM_NODES_WORKFLOW_CMP)) ${N_MFTRAWDEC:-1})
     if [[ $RUNTYPE == "PHYSICS" || $RUNTYPE == "COSMICS" ]]; then
-      if [[ $BEAMTYPE == "pp" ]]; then
+      if [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]]; then
         N_ITSTRK=$(math_max $((9 * 200 / $RECO_NUM_NODES_WORKFLOW_CMP)) ${N_ITSTRK:-1})
       elif [[ $BEAMTYPE == "cosmic" ]]; then
         N_ITSTRK=$(math_max $((5 * 200 / $RECO_NUM_NODES_WORKFLOW_CMP)) ${N_ITSTRK:-1})
@@ -239,7 +249,7 @@ if [[ -z ${EVE_NTH_EVENT:-} ]]; then
     EVE_NTH_EVENT=2
   elif [[ "$HIGH_RATE_PP" == "1" ]]; then
     EVE_NTH_EVENT=10
-  elif [[ $BEAMTYPE == "pp" ]]; then
+  elif [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]]; then
     EVE_NTH_EVENT=$((4 * 250 / $RECO_NUM_NODES_WORKFLOW_CMP))
   else # COSMICS / TECHNICALS / ...
     EVE_NTH_EVENT=1
@@ -259,7 +269,7 @@ else
 fi
 
 # Random data sampling fraction for MCH
-if [[ $BEAMTYPE == "pp" ]]; then
+if [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]]; then
     : ${CUT_RANDOM_FRACTION_MCH_WITH_ITS:=0.5}
     : ${CUT_RANDOM_FRACTION_MCH_NO_ITS:=0.995}
 elif [[ "$HIGH_RATE_PP" == "1" ]]; then

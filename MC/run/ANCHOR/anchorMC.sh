@@ -45,9 +45,7 @@ print_help()
   echo
   echo "as well as:"
   echo "NTIMEFRAMES,"
-  echo "NSIGEVENTS,"
   echo "SPLITID,"
-  echo "CYCLE,"
   echo "PRODSPLIT."
   echo
   echo "Optional are:"
@@ -62,6 +60,8 @@ print_help()
   echo "ALIEN_JDL_INVERT_IRFRAME_SELECTION, invertes the choice of ALIEN_JDL_RUN_TIME_SPAN_FILE"
   echo "ALIEN_JDL_CCDB_CONDITION_NOT_AFTER, sets the condition_not_after timestamp for CCDB queries"
   echo "DISABLE_QC, set this to disable QC, e.g. to 1"
+  echo "CYCLE, to set a cycle number different than 0"
+  echo "NSIGEVENTS, to enforce a specific upper limit of events in a timeframe (not counting orbit-early) events"
 }
 
 # Prevent the script from being soured to omit unexpected surprises when exit is used
@@ -142,11 +142,20 @@ fi
 [ -z "${ALIEN_JDL_LPMANCHORYEAR}" ] && { echo_error "Set ALIEN_JDL_LPMANCHORYEAR or ANCHORYEAR" ; exit 1 ; }
 
 [ -z "${NTIMEFRAMES}" ] && { echo_error "Set NTIMEFRAMES" ; exit 1 ; }
-[ -z "${NSIGEVENTS}" ] && { echo_error "Set NSIGEVENTS" ; exit 1 ; }
 [ -z "${SPLITID}" ] && { echo_error "Set SPLITID" ; exit 1 ; }
-[ -z "${CYCLE}" ] && { echo_error "Set CYCLE" ; exit 1 ; }
 [ -z "${PRODSPLIT}" ] && { echo_error "Set PRODSPLIT" ; exit 1 ; }
 
+# The number of signal events can be given, but should be useful only in
+# certain expert modes. In the default case, the final event number is determined by the timeframe length.
+if [ -z "${NSIGEVENTS}" ]; then
+  NSIGEVENTS=10000 # this is just some big number; In the simulation the event number is the minimum of this number and what fits into a single timeframe
+                   # based on the interaction rate. The number is a reasonable upper limit related to ~5696 collisions that fit into 32 LHC orbits at 2MHz interaction rate.
+fi
+
+if [ -z "${CYCLE}" ]; then
+  echo_info "No CYCLE number given ... defaulting to 0"
+  CYCLE=0
+fi
 
 # this generates an exact reproducer script for this job
 # that can be used locally for debugging etc.
@@ -162,7 +171,7 @@ SEED=${ALIEN_PROC_ID:-${SEED:-1}}
 ONCVMFS=0
 
 if [ "${ALIEN_JDL_O2DPG_OVERWRITE}" ]; then
-  echo "Setting O2DPG_ROOT to overwritten path"
+  echo "Setting O2DPG_ROOT to overwritten path ${ALIEN_JDL_O2DPG_OVERWRITE}"
   export O2DPG_ROOT=${ALIEN_JDL_O2DPG_OVERWRITE}
 fi
 
@@ -252,7 +261,7 @@ if [[ ! -f workflowconfig.log ]]; then
   exit 1
 fi
 
-ALIEN_JDL_LPMPRODUCTIONTAG=$ALIEN_JDL_LPMPRODUCTIONTAG_KEEP
+export ALIEN_JDL_LPMPRODUCTIONTAG=$ALIEN_JDL_LPMPRODUCTIONTAG_KEEP
 echo_info "Setting back ALIEN_JDL_LPMPRODUCTIONTAG to $ALIEN_JDL_LPMPRODUCTIONTAG"
 
 # get rid of the temporary software environment
@@ -287,10 +296,19 @@ MODULES="--skipModules ZDC"
 # Since this is used, set it explicitly
 ALICEO2_CCDB_LOCALCACHE=${ALICEO2_CCDB_LOCALCACHE:-$(pwd)/ccdb}
 
+# publish MCPRODINFO for first few jobs of a production
+# if external script exported PUBLISH_MCPRODINFO, it will be published anyways
+if [ -z "$PUBLISH_MCPRODINFO" ] && [ "$SPLITID" -lt 20 ]; then
+  PUBLISH_MCPRODINFO_OPTION="--publish-mcprodinfo"
+  echo "Will publish MCProdInfo"
+else
+  echo "Will not publish MCProdInfo"
+fi
+
 # these arguments will be digested by o2dpg_sim_workflow_anchored.py
 baseargs="-tf ${NTIMEFRAMES} --split-id ${SPLITID} --prod-split ${PRODSPLIT} --cycle ${CYCLE} --run-number ${ALIEN_JDL_LPMRUNNUMBER}                                \
           ${ALIEN_JDL_RUN_TIME_SPAN_FILE:+--run-time-span-file ${ALIEN_JDL_RUN_TIME_SPAN_FILE} ${ALIEN_JDL_INVERT_IRFRAME_SELECTION:+--invert-irframe-selection}}   \
-          ${ALIEN_JDL_MC_ORBITS_PER_TF:+--orbitsPerTF ${ALIEN_JDL_MC_ORBITS_PER_TF}}"
+          ${ALIEN_JDL_MC_ORBITS_PER_TF:+--orbitsPerTF ${ALIEN_JDL_MC_ORBITS_PER_TF}} ${PUBLISH_MCPRODINFO_OPTION}"
 
 # these arguments will be passed as well but only eventually be digested by o2dpg_sim_workflow.py which is called from o2dpg_sim_workflow_anchored.py
 remainingargs="-seed ${SEED} -ns ${NSIGEVENTS} --include-local-qc --pregenCollContext"
@@ -368,15 +386,16 @@ echo_info "Ready to start main workflow"
 
 ${O2DPG_ROOT}/MC/bin/o2_dpg_workflow_runner.py -f workflow.json -tt ${ALIEN_JDL_O2DPGWORKFLOWTARGET:-aod} --cpu-limit ${ALIEN_JDL_CPULIMIT:-8} --dynamic-resources
 MCRC=$?  # <--- we'll report back this code
-if [[ "${ALIEN_JDL_ADDTIMESERIESINMC}" != "0" ]]; then
+if [[ "${MCRC}" == "0" && "${ALIEN_JDL_ADDTIMESERIESINMC}" != "0" ]]; then
   # Default value is 1 so this is run by default.
   echo_info "Running TPC time series"
   ${O2DPG_ROOT}/MC/bin/o2_dpg_workflow_runner.py -f workflow.json -tt tpctimes
+  # Note: We could maybe avoid this if-else by including `tpctimes` directly in the workflow-targets above
 fi
 
-[[ ! -z "${DISABLE_QC}" ]] && echo_info "QC is disabled, skip it."
+[[ -n "${DISABLE_QC}" ]] && echo_info "QC is disabled, skip it."
 
-if [[ -z "${DISABLE_QC}" && "${MCRC}" = "0" && "${remainingargs}" == *"--include-local-qc"* ]] ; then
+if [[ -z "${DISABLE_QC}" && "${MCRC}" == "0" && "${remainingargs}" == *"--include-local-qc"* ]] ; then
   # do QC tasks
   echo_info "Doing QC"
   ${O2DPG_ROOT}/MC/bin/o2_dpg_workflow_runner.py -f workflow.json --target-labels QC --cpu-limit ${ALIEN_JDL_CPULIMIT:-8} -k
