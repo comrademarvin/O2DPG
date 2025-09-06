@@ -3,15 +3,6 @@
 
 # process flags passed to the script
 
-if [[ -z "$ALIEN_JDL_USEGPUS" || $ALIEN_JDL_USEGPUS != 1 ]]; then
-  export SETENV_NO_ULIMIT=1
-fi
-
-# to avoid memory issues - we don't do this on the EPNs, since it can affect the performance
-if [[ $ALIEN_JDL_USEGPUS != 1 ]]; then
-  export DPL_DEFAULT_PIPELINE_LENGTH=16
-fi
-
 # check if this is a production on skimmed data
 if grep -q /skimmed/ wn.xml ; then
   export ON_SKIMMED_DATA=1;
@@ -463,7 +454,7 @@ elif [[ $ALIGNLEVEL == 1 ]]; then
 
 
   # set IR for TPC, even if it is not used for corrections scaling
-  if  (( $(echo "$INST_IR_FOR_TPC > 0" | bc -l) )) ; then # externally imposed CTP IR
+  if [[ "$INST_IR_FOR_TPC" =~ ^-?[0-9]*\.?[0-9]+$ ]] && (( $(echo "$INST_IR_FOR_TPC > 0" | bc -l) )) ; then # externally imposed CTP IR
     echo "Applying externally provided istantaneous IR $INST_IR_FOR_TPC Hz"
     export TPC_CORR_SCALING+=";TPCCorrMap.lumiInst=$INST_IR_FOR_TPC"
   elif [[ $INST_IR_FOR_TPC == "CTP" ]]; then
@@ -487,6 +478,9 @@ elif [[ $ALIGNLEVEL == 1 ]]; then
     elif [[ $TPC_SCALING_SOURCE == "CTP" ]]; then
       echo "CTP Lumi from data will be used for TPC scaling"
       export TPC_CORR_SCALING+=" --lumi-type 1 "
+      if [[ $ALIEN_JDL_USEDERIVATIVESFORSCALING == "1" ]]; then
+        export TPC_CORR_SCALING+=" --corrmap-lumi-mode 1 "
+      fi
     elif [[ $TPC_SCALING_SOURCE == "IDCCCDB" ]]; then
       echo "TPC correction with IDC from CCDB will be used"
       export TPC_CORR_SCALING+=" --lumi-type 2 "
@@ -800,6 +794,10 @@ fi
 
 if [[ $ALIEN_JDL_THINAODS == "1" ]] ; then
   export ARGS_EXTRA_PROCESS_o2_aod_producer_workflow+=" --thin-tracks"
+fi
+
+if [[ $ALIEN_JDL_PREPROPAGATE == "1" ]] ; then
+  export ARGS_EXTRA_PROCESS_o2_aod_producer_workflow+=" --propagate-tracks --propagate-tracks-max-xiu 5"
 fi
 
 # Enabling QC

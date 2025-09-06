@@ -70,7 +70,7 @@ parser.add_argument('-gen',help='generator: pythia8, extgen', default='')
 parser.add_argument('-proc',help='process type: inel, dirgamma, jets, ccbar, ...', default='none')
 parser.add_argument('-trigger',help='event selection: particle, external', default='')
 parser.add_argument('-ini',help='generator init parameters file (full paths required), for example: ${O2DPG_ROOT}/MC/config/PWGHF/ini/GeneratorHF.ini', default='')
-parser.add_argument('-confKey',help='generator or trigger configuration key values, for example: "GeneratorPythia8.config=pythia8.cfg;A.x=y"', default='')
+parser.add_argument('-confKey',help='o2sim, generator or trigger configuration key values, for example: "GeneratorPythia8.config=pythia8.cfg;A.x=y"', default='')
 parser.add_argument('--readoutDets',help='comma separated string of detectors readout (does not modify material budget - only hit creation)', default='all')
 parser.add_argument('--make-evtpool', help='Generate workflow for event pool creation.', action='store_true')
 
@@ -153,6 +153,7 @@ parser.add_argument('--mft-assessment-full', action='store_true', help='enables 
 
 # TPC options
 parser.add_argument('--tpc-distortion-type', default=0, type=int, help='Simulate distortions in the TPC (0=no distortions, 1=distortions without scaling, 2=distortions with CTP scaling)')
+parser.add_argument('--tpc-corrmap-lumi-mode', default=2, type=int, help='TPC corrections mode (0=linear, 1=derivative, 2=derivative for special MC maps')
 parser.add_argument('--ctp-scaler', default=0, type=float, help='CTP raw scaler value used for distortion simulation')
 # Global Forward reconstruction configuration
 parser.add_argument('--fwdmatching-assessment-full', action='store_true', help='enables complete assessment of global forward reco')
@@ -234,8 +235,8 @@ if args.overwrite_config != '':
 # We still may need adjust configurations manually for consistency:
 #
 # * Force simpler TPC digitization of if TPC reco does not have the mc-time-gain option:
-tpc_envfile = 'env_async.env' if environ.get('ALIEN_JDL_O2DPG_ASYNC_RECO_TAG') is not None else None
-tpcreco_mctimegain = option_if_available('o2-tpc-reco-workflow', '--tpc-mc-time-gain', envfile=tpc_envfile)
+async_envfile = 'env_async.env' if environ.get('ALIEN_JDL_O2DPG_ASYNC_RECO_TAG') is not None else None
+tpcreco_mctimegain = option_if_available('o2-tpc-reco-workflow', '--tpc-mc-time-gain', envfile=async_envfile)
 if tpcreco_mctimegain == '':
    # this was communicated by Jens Wiechula@TPC; avoids dEdX issue https://its.cern.ch/jira/browse/O2-5486 for the 2tag mechanism
    print ("TPC reco does not support --tpc-mc-time-gain. Adjusting some config for TPC digitization")
@@ -472,28 +473,32 @@ globalinittask['cmd'] = 'o2-ccdb-cleansemaphores -p ${ALICEO2_CCDB_LOCALCACHE}'
 workflow['stages'].append(globalinittask)
 ####
 
+usebkgcache=args.use_bkg_from!=None
+includeFullQC=args.include_qc=='True' or args.include_qc==True
+includeLocalQC=args.include_local_qc=='True' or args.include_local_qc==True
+includeAnalysis = args.include_analysis
+includeTPCResiduals=True if environ.get('ALIEN_JDL_DOTPCRESIDUALEXTRACTION') == '1' else False
+ccdbRemap = environ.get('ALIEN_JDL_REMAPPINGS')
+
+qcdir = "QC"
+if (includeLocalQC or includeFullQC) and not isdir(qcdir):
+    mkdir(qcdir)
+
 def getDPL_global_options(bigshm=False, ccdbbackend=True):
    common=" -b --run "
    if len(args.dpl_child_driver) > 0:
      common=common + ' --child-driver ' + str(args.dpl_child_driver)
    if ccdbbackend:
      common=common + " --condition-not-after " + str(args.condition_not_after)
+     if ccdbRemap != None:
+        common=common + " --condition-remap " + ccdbRemap
    if args.noIPC!=None:
       return common + " --no-IPC "
    if bigshm:
       return common + " --shm-segment-size ${SHMSIZE:-50000000000} "
    else:
       return common
-
-usebkgcache=args.use_bkg_from!=None
-includeFullQC=args.include_qc=='True' or args.include_qc==True
-includeLocalQC=args.include_local_qc=='True' or args.include_local_qc==True
-includeAnalysis = args.include_analysis
-
-qcdir = "QC"
-if (includeLocalQC or includeFullQC) and not isdir(qcdir):
-    mkdir(qcdir)
-
+    
 # create/publish the GRPs and other GLO objects for consistent use further down the pipeline
 orbitsPerTF=int(args.orbitsPerTF)
 GRP_TASK = createTask(name='grpcreate', cpu='0')
@@ -519,7 +524,11 @@ vtxmode_sgngen = 'kCollContext'
 
 # preproduce the collision context / timeframe structure for all timeframes at once
 precollneeds=[GRP_TASK['name']]
-NEventsQED=10000  # max number of QED events to simulate per timeframe
+# max number of QED events simulated per timeframe.
+# A large pool of QED events (0.6*INTRATE) is needed to avoid repetition of events in the same or
+# neighbouring ITS readout frames, which would fire already activated pixel, discarding the event.
+# Discussed in detail in https://its.cern.ch/jira/browse/O2-5861
+NEventsQED = max(10000, int(INTRATE*0.6))
 # Hadronic cross section values are taken from Glauber MC
 XSecSys = {'PbPb': 8., 'OO': 1.273, 'NeNe': 1.736}
 # QED cross section values were calculated with TEPEMGEN
@@ -723,7 +732,6 @@ for tf in range(1, NTIMEFRAMES + 1):
 
    QEDdigiargs = ""
    if includeQED:
-     NEventsQED=10000 # 35K for a full timeframe?
      qedneeds=[GRP_TASK['name'], PreCollContextTask['name']]
      QED_task=createTask(name='qedsim_'+str(tf), needs=qedneeds, tf=tf, cwd=timeframeworkdir, cpu='1')
      ########################################################################################################
@@ -1093,7 +1101,7 @@ for tf in range(1, NTIMEFRAMES + 1):
       det_to_digitask[det]=t
 
    # detectors serving CTP need to be treated somewhat special since CTP needs
-   # these inputs at the same time --> still need to be made better
+   # these inputs at the same time --> still need to be made better.
    tneeds = [ContextTask['name']]
    if includeQED:
      tneeds += [QED_task['name']]
@@ -1108,6 +1116,7 @@ for tf in range(1, NTIMEFRAMES + 1):
       '--onlyDet FT0,FV0,EMC,CTP', 
       f'--interactionRate {INTRATE}',
       f'--incontext {CONTEXTFILE}',
+      f'--store-ctp-lumi {CTPSCALER}',
       '--disable-write-ini',
       putConfigValues(listOfMainKeys=['EMCSimParam','FV0DigParam','FT0DigParam'], localCF={"DigiParams.seed" : str(TFSEED)}),
       ('--combine-devices','')[args.no_combine_dpl_devices],
@@ -1167,17 +1176,19 @@ for tf in range(1, NTIMEFRAMES + 1):
    # in case of PbPb the conversion factor ZDC ->FT0 (pp) must be set
    tpc_corr_options_mc=''
 
+   tpcCorrmapLumiMode = args.tpc_corrmap_lumi_mode
+
    if tpcDistortionType == 0: # disable distortion corrections
       tpc_corr_options_mc=' --corrmap-lumi-mode 0 '
       tpcLocalCFreco['TPCCorrMap.lumiMean'] = '-1';
    elif tpcDistortionType == 1: # disable scaling
-      tpc_corr_options_mc=' --corrmap-lumi-mode 2 '
+      tpc_corr_options_mc=' --corrmap-lumi-mode ' + str(tpcCorrmapLumiMode) + ' '
       tpcLocalCFreco['TPCCorrMap.lumiInst'] = str(CTPSCALER)
       tpcLocalCFreco['TPCCorrMap.lumiMean'] = str(CTPSCALER)
    elif tpcDistortionType == 2: # full scaling with CTP values
       if COLTYPE == 'PbPb':
          tpcLocalCFreco['TPCCorrMap.lumiInstFactor'] = str(lumiInstFactor)
-      tpc_corr_options_mc=' --corrmap-lumi-mode 2 '
+      tpc_corr_options_mc=' --corrmap-lumi-mode ' + str(tpcCorrmapLumiMode) + ' '
       tpcLocalCFreco['TPCCorrMap.lumiInst'] = str(CTPSCALER)
 
    # Setup the TPC correction scaling options for reco; They come from the anchoring setup
@@ -1311,6 +1322,7 @@ for tf in range(1, NTIMEFRAMES + 1):
    #<--------- TOF-TPC(-ITS) global track matcher workflow
    toftpcmatchneeds = [TOFRECOtask['name'], TPCRECOtask['name'], ITSTPCMATCHtask['name'], TRDTRACKINGtask2['name']]
    toftracksrcdefault = dpl_option_from_config(anchorConfig, 'o2-tof-matcher-workflow', 'track-sources', default_value='TPC,ITS-TPC,TPC-TRD,ITS-TPC-TRD')
+   tofusefit = option_if_available('o2-tof-matcher-workflow', '--use-fit', envfile=async_envfile)
    TOFTPCMATCHERtask = createTask(name='toftpcmatch_'+str(tf), needs=toftpcmatchneeds, tf=tf, cwd=timeframeworkdir, lab=["RECO"], mem='1000')
    tofmatcher_cmd_parts = [
      '${O2_ROOT}/bin/o2-tof-matcher-workflow',
@@ -1321,9 +1333,11 @@ for tf in range(1, NTIMEFRAMES + 1):
                       'ITSCATrackerParam',
                       'MFTClustererParam',
                       'GPU_rec_tpc',
+                      'ft0tag',
                       'trackTuneParams'], tpcLocalCFreco),
      ' --track-sources ' + toftracksrcdefault,
      (' --combine-devices','')[args.no_combine_dpl_devices],
+     tofusefit,
      tpc_corr_scaling_options,
      tpc_corr_options_mc
    ]
@@ -1596,10 +1610,15 @@ for tf in range(1, NTIMEFRAMES + 1):
             aod_creator = f.getvalue().strip()
             print (f"Determined GRID username {aod_creator}")
 
+   # this option might not be universally available
+   created_by_option = option_if_available('o2-aod-producer-workflow', '--created-by', envfile=async_envfile)
+   if created_by_option != '':
+      created_by_option += ' ' + aod_creator
+
    AODtask = createTask(name='aod_'+str(tf), needs=aodneeds, tf=tf, cwd=timeframeworkdir, lab=["AOD"], mem='4000', cpu='1')
    AODtask['cmd'] = ('','ln -nfs ../bkg_Kine.root . ;')[doembedding]
-   AODtask['cmd'] += '[ -f AO2D.root ] && rm AO2D.root; '  
-   AODtask["cmd"] += task_finalizer([
+   AODtask['cmd'] += '[ -f AO2D.root ] && rm AO2D.root; '
+   AODtask['cmd'] += task_finalizer([
       "${O2_ROOT}/bin/o2-aod-producer-workflow",
       "--reco-mctracks-only 1",
       "--aod-writer-keep dangling",
@@ -1611,15 +1630,72 @@ for tf in range(1, NTIMEFRAMES + 1):
       f"--lpmp-prod-tag {args.productionTag}",
       "--anchor-pass ${ALIEN_JDL_LPMANCHORPASSNAME:-unknown}",
       "--anchor-prod ${ALIEN_JDL_LPMANCHORPRODUCTION:-unknown}",
-      f"--created-by {aod_creator}",
+      created_by_option,
       "--combine-source-devices" if not args.no_combine_dpl_devices else "",
       "--disable-mc" if args.no_mc_labels else "",
       "--enable-truncation 0" if environ.get("O2DPG_AOD_NOTRUNCATE") or environ.get("ALIEN_JDL_O2DPG_AOD_NOTRUNCATE") else "",
       "--disable-strangeness-tracker" if args.no_strangeness_tracking else "",
       f"--aod-timeframe-id ${{ALIEN_PROC_ID}}{aod_df_id}" if not args.run_anchored else "",
    ])
+   # Consider in future: AODtask['disable_alternative_reco_software'] = True # do not apply reco software here (we prefer latest aod converter)
    workflow['stages'].append(AODtask)
 
+   if includeTPCResiduals:
+      print ("Adding TPC residuals extraction and aggregation")
+
+      #<------------- TPC residuals extraction
+      scdcalib_vertex_sources = dpl_option_from_config(anchorConfig,
+                                                       'o2-tpc-scdcalib-interpolation-workflow',
+                                                       'vtx-sources',
+                                                       default_value='ITS-TPC,TPC-TRD,ITS-TPC-TRD,TPC-TOF,ITS-TPC-TOF,TPC-TRD-TOF,ITS-TPC-TRD-TOF,MFT-MCH,MCH-MID,ITS,MFT,TPC,TOF,FT0,MID,EMC,PHS,CPV,FDD,HMP,FV0,TRD,MCH,CTP')
+
+      scdcalib_track_sources = dpl_option_from_config(anchorConfig,
+                                                      'o2-tpc-scdcalib-interpolation-workflow',
+                                                      'tracking-sources',
+                                                      default_value='ITS-TPC,TPC-TRD,ITS-TPC-TRD,TPC-TOF,ITS-TPC-TOF,TPC-TRD-TOF,ITS-TPC-TRD-TOF,MFT-MCH,MCH-MID,ITS,MFT,TPC,TOF,FT0,MID,EMC,PHS,CPV,FDD,HMP,FV0,TRD,MCH,CTP')
+
+      scdcalib_track_extraction = dpl_option_from_config(anchorConfig,
+                                                         'o2-tpc-scdcalib-interpolation-workflow',
+                                                         'tracking-sources-map-extraction',
+                                                         default_value='ITS-TPC')
+
+      SCDCALIBtask = createTask(name='scdcalib_'+str(tf), needs=[PVFINDERtask['name']], tf=tf, cwd=timeframeworkdir, lab=["CALIB"], mem='4000')
+      SCDCALIBtask['cmd'] = task_finalizer(
+         [ '${O2_ROOT}/bin/o2-tpc-scdcalib-interpolation-workflow',
+           getDPL_global_options(bigshm=True),
+           putConfigValues(['scdcalib']),
+           '--vtx-sources ' + scdcalib_vertex_sources,
+           '--tracking-sources ' + scdcalib_track_sources,
+           '--tracking-sources-map-extraction ' + scdcalib_track_extraction,
+           '--sec-per-slot 1 ',
+           '--send-track-data'
+        ])
+      workflow['stages'].append(SCDCALIBtask)
+
+      #<------------- TPC residuals aggregator
+      scdaggreg_secperslot = dpl_option_from_config(anchorConfig,
+                                                    'o2-calibration-residual-aggregator',
+                                                    'sec-per-slot',
+                                                    default_value='600')
+      scdaggreg_outputtype = dpl_option_from_config(anchorConfig,
+                                                    'o2-calibration-residual-aggregator',
+                                                    'output-type',
+                                                    default_value='trackParams,unbinnedResid')
+
+      SCDAGGREGtask = createTask(name='scdaggreg_'+str(tf), needs=[SCDCALIBtask['name']], tf=tf, cwd=timeframeworkdir, lab=["CALIB"], mem='1500')
+      SCDAGGREGtask['cmd'] = task_finalizer(
+         [ '${O2_ROOT}/bin/o2-calibration-residual-aggregator',
+           getDPL_global_options(bigshm=True),
+           '--sec-per-slot ' + scdaggreg_secperslot,
+           '--enable-ctp ',
+           '--enable-track-input',
+           '--output-dir ./',
+           '--output-type ' +  scdaggreg_outputtype,
+           '--meta-output-dir /dev/null'
+         ])
+      workflow['stages'].append(SCDAGGREGtask)
+
+   # conditional
    #
    # QC tasks follow
    #
@@ -1877,7 +1953,10 @@ if not args.make_evtpool:
    AOD_merge_task = createTask(name='aodmerge', needs = aodmergerneeds, lab=["AOD"], mem='2000', cpu='1')
    AOD_merge_task['cmd'] = ' set -e ; [ -f aodmerge_input.txt ] && rm aodmerge_input.txt; '
    AOD_merge_task['cmd'] += ' for i in `seq 1 ' + str(NTIMEFRAMES) + '`; do echo "tf${i}/AO2D.root" >> aodmerge_input.txt; done; '
-   AOD_merge_task['cmd'] += ' o2-aod-merger --input aodmerge_input.txt --output AO2D.root'
+   AOD_merge_task['cmd'] += ' o2-aod-merger --input aodmerge_input.txt --output AO2D_pre.root'
+   # reindex the BC + connected tables because it there could be duplicate BC entries due to the orbit-early treatment
+   # see https://its.cern.ch/jira/browse/O2-6227
+   AOD_merge_task['cmd'] += ' ; root -q -b -l "${O2DPG_ROOT}/MC/utils/AODBcRewriter.C(\\\"AO2D_pre.root\\\",\\\"AO2D.root\\\")"'
    # produce MonaLisa event stat file
    AOD_merge_task['cmd'] += ' ; ${O2DPG_ROOT}/MC/bin/o2dpg_determine_eventstat.py'
    AOD_merge_task['alternative_alienv_package'] = "None" # we want latest software for this step
@@ -1900,6 +1979,16 @@ else:
    # also create the stat file with the event count
    POOL_merge_task['cmd'] += '; RC=$?; root -l -q -b -e "auto f=TFile::Open(\\\"evtpool.root\\\"); auto t=(TTree*)f->Get(\\\"o2sim\\\"); int n=t->GetEntries(); std::ofstream((\\\"0_0_0_\\\"+std::to_string(n)+\\\".stat\\\").c_str()) << \\\"# MonaLisa stat file for event pools\\\";" ; [[ ${RC} == 0 ]]'
    workflow['stages'].append(POOL_merge_task)
+
+# if TPC residuals extraction was requested, we have to merge per-tf trees
+if includeTPCResiduals:
+   tpcResidMergingNeeds = ['scdaggreg_' + str(tf) for tf in range(1, NTIMEFRAMES + 1)]
+   TPCResid_merge_task = createTask(name='tpcresidmerge', needs = tpcResidMergingNeeds, lab=["CALIB"], mem='2000', cpu='1')
+   TPCResid_merge_task['cmd'] = ' set -e ; [ -f tpcresidmerge_input.txt ] && rm tpcresidmerge_input.txt; '
+   TPCResid_merge_task['cmd'] += ' for i in `seq 1 ' + str(NTIMEFRAMES) + '`; do find tf${i} -name "o2tpc_residuals_*.root" >> tpcresidmerge_input.txt; done; '
+   TPCResid_merge_task['cmd'] += '${O2DPG_ROOT}/UTILS/root_merger.py -o o2tpc_residuals.root -i $(grep -v \"^$\" tpcresidmerge_input.txt | paste -sd, -)'
+   workflow['stages'].append(TPCResid_merge_task)
+
 
 # adjust for alternate (RECO) software environments
 adjust_RECO_environment(workflow, args.alternative_reco_software)
