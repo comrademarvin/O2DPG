@@ -46,7 +46,7 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
     if standalone == True:
       needs = []
     elif needs == None:
-      needs = [taskName + '_local' + str(tf) for tf in range(1, ntimeframes + 1)]
+      needs = [taskName + '_local_' + str(tf) for tf in range(1, ntimeframes + 1)]
 
     task = createTask(name=QC_finalize_name(taskName), needs=needs, cwd=qcdir, lab=["QC"], cpu=1, mem='2000')
     def remove_json_prefix(path):
@@ -95,15 +95,16 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
   add_QC_finalization('emcBCQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/emc-reco-tasks.json')
   #add_QC_finalization('tpcTrackingQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/tpc-qc-tracking-direct.json')
   add_QC_finalization('tpcStandardQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/tpc-qc-standard-direct.json')
-  add_QC_finalization('trdDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/trd-standalone-task.json')
-  add_QC_finalization('trdTrackingQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/trd-tracking-task.json')
+  if isActive('TRD'):
+     add_QC_finalization('trdDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/trd-standalone-task.json')
+     add_QC_finalization('trdTrackingQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/trd-tracking-task.json')
   add_QC_finalization('vertexQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/vertexing-qc-direct-mc.json')
   add_QC_finalization('ITSTPCmatchQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/ITSTPCmatchedTracks_direct_MC.json')
   add_QC_finalization('TOFMatchQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/tofMatchedTracks_ITSTPCTOF_TPCTOF_direct_MC.json')
   add_QC_finalization('tofDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/tofdigits.json')
   add_QC_finalization('TOFMatchWithTRDQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/tofMatchedTracks_AllTypes_direct_MC.json')
-  add_QC_finalization('ITSTrackSimTask', 'json://${O2DPG_ROOT}/MC/config/QC/json/its-mc-tracks-qc.json')
-  add_QC_finalization('ITSTracksClusters', 'json://${O2DPG_ROOT}/MC/config/QC/json/its-clusters-tracks-qc.json')
+  add_QC_finalization('ITSTrackSimTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/its-mc-tracks-qc.json')
+  add_QC_finalization('ITSTracksClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/its-clusters-tracks-qc.json')
   if isActive('MID'):
      add_QC_finalization('MIDTaskQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/mid-task.json')
   if isActive('MCH'):
@@ -128,9 +129,11 @@ def include_all_QC_finalization(ntimeframes, standalone, run, productionTag, con
   add_QC_finalization('RecPointsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/ft0-reconstruction-config.json')
   add_QC_finalization('FV0DigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/fv0-digits.json')
   add_QC_finalization('FDDRecPointsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/fdd-recpoints.json')
-  add_QC_finalization('CPVDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-digits-task.json')
-  add_QC_finalization('CPVClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-clusters-task.json')
-  add_QC_finalization('PHSCellsClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/phs-cells-clusters-task.json')
+  if isActive('CPV'):
+     add_QC_finalization('CPVDigitsQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-digits-task.json')
+     add_QC_finalization('CPVClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/cpv-clusters-task.json')
+  if isActive('PHS'):
+     add_QC_finalization('PHSCellsClustersQC', 'json://${O2DPG_ROOT}/MC/config/QC/json/phs-cells-clusters-task.json')
 
   # The list of QC Post-processing workflows
   add_QC_postprocessing('tofTrendingHits', 'json://${O2DPG_ROOT}/MC/config/QC/json/tof-trending-hits.json', [QC_finalize_name('tofDigitsQC')], runSpecific=False, prodSpecific=True)

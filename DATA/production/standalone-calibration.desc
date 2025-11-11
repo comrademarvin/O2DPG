@@ -26,7 +26,9 @@ ITS-tot-1row: "O2PDPSuite" reco,40,40,"RUNTYPE_ITS=tot1row production/calib/its-
 
 ITS-tot-fullfast: "O2PDPSuite" reco,40,40,"RUNTYPE_ITS=totfullfast production/calib/its-threshold-processing.sh" calib,40,"RUNTYPE_ITS=totfullfast production/calib/its-threshold-aggregator.sh"
 
-ITS-vresetd: "O2PDPSuite" reco,5,5,"RUNTYPE_ITS=vresetd production/calib/its-threshold-processing.sh" calib,5,"RUNTYPE_ITS=vresetd production/calib/its-threshold-aggregator.sh"
+ITS-vresetd-1d: "O2PDPSuite" reco,5,5,"RUNTYPE_ITS=vresetd-1d production/calib/its-threshold-processing.sh" calib,5,"RUNTYPE_ITS=vresetd-1d production/calib/its-threshold-aggregator.sh"
+
+ITS-vresetd-2d: "O2PDPSuite" reco,5,5,"RUNTYPE_ITS=vresetd-2d production/calib/its-threshold-processing.sh" calib,5,"RUNTYPE_ITS=vresetd-2d production/calib/its-threshold-aggregator.sh"
 
 TOF-diagnostic-calibration: "O2PDPSuite" reco,10,10,"SHMSIZE=120376524800 production/calib/tof-standalone-reco.sh" calib,4,"production/calib/tof-diagn-aggregator.sh"
 
@@ -38,9 +40,9 @@ TPC-pulser-long: "O2PDPSuite" reco,1,1," production/calib/tpc-pulser-long.sh"
 
 TPC-pedestal: "O2PDPSuite" reco,1,1," production/calib/tpc-pedestal.sh"
 
-TPC-laser: "O2PDPSuite" reco,1,1,"SHMSIZE=$((128 << 30)) GPUTYPE=HIP GPUMEMSIZE=$(( 24 << 30 )) HOSTMEMSIZE=$(( 5 << 30 ))  production/calib/tpc-laser.sh"
+TPC-laser: "O2PDPSuite" reco,1,1,"SHMSIZE=$((128 << 30)) production/calib/tpc-laser.sh"
 
-TPC-laser-multi: "O2PDPSuite" reco,10,10,"SHMSIZE=$((128 << 30)) GPUTYPE=HIP GPUMEMSIZE=$(( 24 << 30 )) HOSTMEMSIZE=$(( 5 << 30 ))  production/calib/tpc-laser-filter.sh" calib,1,"production/calib/tpc-laser-aggregator.sh"
+TPC-laser-multi: "O2PDPSuite" reco,10,10,"SHMSIZE=$((128 << 30)) production/calib/tpc-laser-filter.sh" calib,1,"production/calib/tpc-laser-aggregator.sh"
 
 MFT-noise-calibration: "O2PDPSuite" reco,20,20,"production/calib/mft-noise-processing.sh" calib,20,"production/calib/mft-noise-aggregator.sh"
 

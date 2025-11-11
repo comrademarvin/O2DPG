@@ -1,6 +1,23 @@
 #!/bin/bash
 
 ######################################
+# Add Herwig, GSL, ThePEG and nlohmann_json packages to root include path and library path if not already present
+######################################
+
+# ROOT_INCLUDE_PATH
+[[ -n "$THEPEG_ROOT" && ":$ROOT_INCLUDE_PATH:" != *":$THEPEG_ROOT/include:"* ]] && ROOT_INCLUDE_PATH="$THEPEG_ROOT/include:$ROOT_INCLUDE_PATH"
+[[ -n "$HERWIG_ROOT" && ":$ROOT_INCLUDE_PATH:" != *":$HERWIG_ROOT/include:"* ]] && ROOT_INCLUDE_PATH="$HERWIG_ROOT/include:$ROOT_INCLUDE_PATH"
+[[ -n "$GSL_ROOT" && ":$ROOT_INCLUDE_PATH:" != *":$GSL_ROOT/include:"* ]] && ROOT_INCLUDE_PATH="$GSL_ROOT/include:$ROOT_INCLUDE_PATH"
+[[ -n "$NLOHMANN_JSON_ROOT" && ":$ROOT_INCLUDE_PATH:" != *":$NLOHMANN_JSON_ROOT/include:"* ]] && ROOT_INCLUDE_PATH="$NLOHMANN_JSON_ROOT/include:$ROOT_INCLUDE_PATH"
+
+# LD_LIBRARY_PATH
+[[ -n "$THEPEG_ROOT" && ":$LD_LIBRARY_PATH:" != *":$THEPEG_ROOT/lib/ThePEG:"* ]] && LD_LIBRARY_PATH="$THEPEG_ROOT/lib/ThePEG:$LD_LIBRARY_PATH"
+[[ -n "$HERWIG_ROOT" && ":$LD_LIBRARY_PATH:" != *":$HERWIG_ROOT/lib/Herwig:"* ]] && LD_LIBRARY_PATH="$HERWIG_ROOT/lib/Herwig:$LD_LIBRARY_PATH"
+[[ -n "$GSL_ROOT" && ":$LD_LIBRARY_PATH:" != *":$GSL_ROOT/lib:"* ]] && LD_LIBRARY_PATH="$GSL_ROOT/lib:$LD_LIBRARY_PATH"
+
+export ROOT_INCLUDE_PATH LD_LIBRARY_PATH
+
+######################################
 # Entrypoint for O2DPG related tests #
 ######################################
 
@@ -76,6 +93,16 @@ get_test_script_path_for_ini()
     echo ${path_to_test_script}
 }
 
+get_nevents_from_ini()
+{
+    # function to force the number of events to be simulated from the ini file (default = 100)
+    # Syntax: #NEV_TEST> 10 (space between #NEV_TEST> and the number is mandatory)
+    # To be used only if external generator takes too long to run causing timeouts in CI
+    local ini_path=${1}
+    local nev=$(grep "#NEV_TEST>" ${ini_path} | tail -n 1 | awk '{print $2}' | tr -d ' ')
+    [[ "${nev}" == "" ]] && nev=100
+    echo ${nev}
+}
 
 exec_test()
 {
@@ -89,12 +116,14 @@ exec_test()
     local RET=0
     # this is how our test script is expected to be called
     local test_script=$(get_test_script_path_for_ini ${ini_path})
+    # get the number of events to be simulated from the ini file
+    local nev=$(get_nevents_from_ini ${ini_path})
     # prepare the header of the log files
     echo "### Testing ${ini_path} with generator ${generator} ###" > ${LOG_FILE_KINE}
     echo "### Testing ${ini_path} with generator ${generator} ###" > ${LOG_FILE_GENERIC_KINE}
     echo "### Testing ${ini_path} with generator ${generator} ###" > ${LOG_FILE_SIM}
     # run the simulation, fail if not successful
-    o2-sim -g ${generator_lower} ${trigger} --noGeant -n 100 -j 4 --configFile ${ini_path} --configKeyValues "GeneratorPythia8.includePartonEvent=true" >> ${LOG_FILE_SIM} 2>&1
+    o2-sim -g ${generator_lower} ${trigger} --noGeant -n ${nev} -j 4 --configFile ${ini_path} --configKeyValues "GeneratorPythia8.includePartonEvent=true" >> ${LOG_FILE_SIM} 2>&1
     RET=${?}
     [[ "${RET}" != "0" ]] && { remove_artifacts ; return ${RET} ; }
 

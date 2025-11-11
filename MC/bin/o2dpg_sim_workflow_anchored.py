@@ -122,6 +122,14 @@ def retrieve_Aggregated_RunInfos(run_number):
     detList = o2.detectors.DetID.getNames(runInfo.grpECS.getDetsReadOut())
     assert (run_number == runInfo.runNumber)
     assert (run_number == runInfo.grpECS.getRun())
+
+    print (f"Detector list from RunInfo/GRPECS is {detList}")
+    # potential overwrite in detector list if special env variable ALIEN_JDL_WORKFLOWDETECTORS is set
+    detlist_overwrite = os.getenv("ALIEN_JDL_WORKFLOWDETECTORS")
+    if detlist_overwrite:
+       detList = detlist_overwrite
+       print (f"Detector list is overwritten to {detList} via JDL")
+
     return {"SOR" : runInfo.sor,
             "EOR" : runInfo.eor,
             "FirstOrbit" : runInfo.orbitSOR,
@@ -217,6 +225,12 @@ def retrieve_params_fromGRPECS_and_OrbitReset(ccdbreader, run_number, run_start,
     print ("DetsReadout-Mask: ", grp["mDetsReadout"]['v'])
     detList = o2.detectors.DetID.getNames(grp["mDetsReadout"]['v'])
     print ("Detector list is ", detList)
+
+    # potential reduction in detector list if special env variable ALIEN_JDL_WORKFLOWDETECTORS is set
+    detlist_overwrite = os.getenv("ALIEN_JDL_WORKFLOWDETECTORS")
+    if detlist_overwrite:
+       detList = detlist_overwrite
+       print ("Detector list is overwritten to ", detList)
 
     # orbitReset.get(run_number)
     return {"FirstOrbit" : orbitFirst, "LastOrbit" : orbitLast, "OrbitsPerTF" : int(grp["mNHBFPerTF"]), "detList" : detList}
@@ -582,13 +596,19 @@ def main():
          forwardargs += ' --ctp-scaler ' + str(ctp_local_rate_raw)
 
     # we finally pass forward to the unanchored MC workflow creation
-    # TODO: this needs to be done in a pythonic way clearly
-    # NOTE: forwardargs can - in principle - contain some of the arguments that are appended here. However, the last passed argument wins, so they would be overwritten.
+    # NOTE: forwardargs can - in principle - contain some of the arguments that are appended here. 
+    # However, the last passed argument wins, so they would be overwritten. If this should not happen, the option
+    # needs to be handled as further below:
     energyarg = (" -eCM " + str(eCM)) if A1 == A2 else (" -eA " + str(eA) + " -eB " + str(eB))
     forwardargs += " -tf " + str(args.tf) + " --sor " + str(run_start) + " --timestamp " + str(timestamp) + " --production-offset " + str(prod_offset) + " -run " + str(args.run_number) + " --run-anchored --first-orbit "       \
-                   + str(GLOparams["FirstOrbit"]) + " -field ccdb -bcPatternFile ccdb" + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + str(energyarg)
+                   + str(GLOparams["FirstOrbit"]) + " --orbitsPerTF " + str(GLOparams["OrbitsPerTF"]) + " -col " + str(ColSystem) + str(energyarg)
+    # the following options can be overwritten/influence from the outside
     if not '--readoutDets' in forwardargs:
        forwardargs += ' --readoutDets ' + GLOparams['detList']
+    if not '-field' in forwardargs:
+       forwardargs += ' -field ccdb '
+    if not '-bcPatternFile' in forwardargs:
+       forwardargs += ' -bcPatternFile ccdb '
     print ("forward args ", forwardargs)
     cmd = "${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py " + forwardargs
 

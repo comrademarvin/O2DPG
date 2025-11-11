@@ -143,6 +143,8 @@ for line in f:
                         command_preopt += ' EPN_NODE_MI100=1 EPN_GLOBAL_SCALING="3/2"'
                         if os.getenv('DISABLE_MI100_SERIALIZATION', '0') == '1':
                             command_preopt += ' DISABLE_MI100_SERIALIZATION=1'
+                        if os.getenv('FULL_MI100_SERIALIZATION', '0') == '1':
+                            command_preopt += ' FULL_MI100_SERIALIZATION=1'
                 if reco_num_nodes_override == 0:
                     command_preopt += ' RECO_NUM_NODES_WORKFLOW=' + wf[1]
                 if is_calib_workflow:
@@ -221,7 +223,7 @@ for line in f:
                   odccommand += ' ' + os.environ['GEN_TOPO_ODC_EPN_TOPO_ARGS']
                 if True:
                     replacestring = ''
-                    dd_env_variables = ['DD_DISK_FRACTION', 'EPN_DD_TEST', 'EPN_DD_TEST_2', 'EPN_DD_TEST_3', 'SHM_MANAGER_SHMID']
+                    dd_env_variables = ['DD_DISK_FRACTION', 'TF_SINK_NUM_TFS', 'DD_STF_MIN_ID', 'DD_STF_MAX_ID', 'EPN_DD_TEST', 'EPN_DD_TEST_2', 'EPN_DD_TEST_3', 'SHM_MANAGER_SHMID']
                     for i in dd_env_variables:
                         if i in os.environ:
                             replacestring += ' ' + i + '=' + os.environ[i]
