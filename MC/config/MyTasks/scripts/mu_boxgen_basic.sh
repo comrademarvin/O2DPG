@@ -1,1 +1,1 @@
-o2-sim --run 558801 --field ccdb -n 100000 -g fwmugen -j 20 -m HALL MAG DIPO COMP PIPE ABSO SHIL MCH MID
+o2-sim --run 558801 --field ccdb -n 1000 -g fwmugen -j 20 -m HALL MAG DIPO COMP PIPE ABSO SHIL MCH MID

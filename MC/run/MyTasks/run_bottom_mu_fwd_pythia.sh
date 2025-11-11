@@ -15,10 +15,11 @@ NTFS=${NTFS:-1}
 # number of simulation workers per timeframe
 NWORKERS=${NWORKERS:-20}
 # number of events to be simulated per timeframe
-NEVENTS=${NEVENTS:-1000}
+NEVENTS=${NEVENTS:-100}
 
-${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py -eCM 13600 -seed 12346 -col pp -gen pythia8 -j ${NWORKERS} -ns ${NEVENTS} -tf ${NTFS} -e TGeant4 \
-    -interactionRate 691338 -run 539874 -mod "--skipModules ZDC" \
+# 13.6 TeV: run 539874 & IR 691338; 5.36 TeV: run 559423 & IR: 1115100
+${O2DPG_ROOT}/MC/bin/o2dpg_sim_workflow.py -run 559423 -eCM 5360 -seed 12345 -col pp -gen pythia8 -j ${NWORKERS} -ns ${NEVENTS} -tf ${NTFS} -e TGeant4 \
+    -interactionRate 1115100 -mod "--skipModules ZDC" --mft-assessment-full --fwdmatching-assessment-full --fwdmatching-save-trainingdata \
     -trigger "external" -ini /home/stephan/alice/O2DPG/MC/config/MyTasks/ini/trigger_bottom_mu_pythia.ini \
 	-confKey "GeneratorPythia8.config=/home/stephan/alice/O2DPG/MC/config/MyTasks/pythia8/pythia_bottom_mu.cfg;GeneratorPythia8.includePartonEvent=true"
 
