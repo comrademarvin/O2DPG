@@ -33,8 +33,8 @@ public:
     mHadronPdgList = hadronPdgList;
     mPartPdgToReplaceList = partPdgToReplaceList;
     mFreqReplaceList = freqReplaceList;
-    // Ds1*(2700), Ds1*(2860), Ds3*(2860), Xic(3055)+, Xic(3080)+, Xic(3055)0, Xic(3080)0, LambdaC(2625), LambdaC(2595)
-    mCustomPartPdgs = {30433, 40433, 437, 4315, 4316, 4325, 4326, 4124, 14122};
+    // Ds1*(2700), Ds1*(2860), Ds3*(2860), Xic(3055)+, Xic(3080)+, Xic(3055)0, Xic(3080)0, LambdaC(2625), LambdaC(2595), LambdaC(2860), LambdaC(2880), LambdaC(2940), ThetaC(3100)
+    mCustomPartPdgs = {30433, 40433, 437, 4315, 4316, 4325, 4326, 4124, 14122, 24124, 24126, 4125, 9422111};
     mCustomPartMasses[30433] = 2.714f;
     mCustomPartMasses[40433] =  2.859f;
     mCustomPartMasses[437] = 2.860f;
@@ -44,6 +44,10 @@ public:
     mCustomPartMasses[4326] = 3.0772f;
     mCustomPartMasses[4124] = 2.62810f;
     mCustomPartMasses[14122] = 2.59225f;
+    mCustomPartMasses[24124] = 2.8561f;
+    mCustomPartMasses[24126] = 2.8816;
+    mCustomPartMasses[4125] = 2.9396f;
+    mCustomPartMasses[9422111] = 3.099f;
     mCustomPartWidths[30433] = 0.122f;
     mCustomPartWidths[40433] =  0.160f;
     mCustomPartWidths[437] = 0.053f;
@@ -53,6 +57,10 @@ public:
     mCustomPartWidths[4326] = 0.0036f;
     mCustomPartWidths[4124] = 0.00052f;
     mCustomPartWidths[14122] = 0.0026f;
+    mCustomPartWidths[24124] = 0.0676f;
+    mCustomPartWidths[24126] = 0.0056f;
+    mCustomPartWidths[4125] = 0.017f;
+    mCustomPartWidths[9422111] = 0.0000083f;
     Print();
   }    
 
@@ -258,16 +266,13 @@ protected:
 
   bool replaceParticle(int iPartToReplace, int pdgCodeNew) {
 
-    auto mothers = mPythia.event[iPartToReplace].motherList();
-
-    std::array<int, 25> pdgDiquarks = {1103, 2101, 2103, 2203, 3101, 3103, 3201, 3203, 3303, 4101, 4103, 4201, 4203, 4301, 4303, 4403, 5101, 5103, 5201, 5203, 5301, 5303, 5401, 5403, 5503};
-
-    for (auto const& mother: mothers) {
-      auto pdgMother = std::abs(mPythia.event[mother].id());
-      if (pdgMother > 100 && std::find(pdgDiquarks.begin(), pdgDiquarks.end(), pdgMother) == pdgDiquarks.end()) {
-        return false;
-      }
+    // Check status code: particles with status 91-99 come from decays and should not be replaced
+    int statusMother = std::abs(mPythia.event[iPartToReplace].status());
+    if (statusMother >= 91 && statusMother <= 99) {
+      return false;
     }
+
+    auto mothers = mPythia.event[iPartToReplace].motherList();
 
     int charge = mPythia.event[iPartToReplace].id() / std::abs(mPythia.event[iPartToReplace].id());
     float px = mPythia.event[iPartToReplace].px();
