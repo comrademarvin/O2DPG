@@ -29,11 +29,15 @@ if [[ -z $RUN_IR ]] || [[ -z $RUN_DURATION ]] || [[ -z $RUN_BFIELD ]]; then
   export RUN_BFIELD=`cat BField.txt`
   export RUN_DETECTOR_LIST=`cat DetList.txt`
 fi
+
+BABSI=$(printf "%.0f" "${RUN_BFIELD#-}")
+[[ "$BABSI" -lt 12500 && "$BABSI" -gt 11500 ]] && LOWFIELD=1 || LOWFIELD=0
+
 echo -e "\n"
 echo "Printing run features"
 echo "DETECTOR LIST for current run ($RUNNUMBER) = $RUN_DETECTOR_LIST"
 echo "DURATION for current run ($RUNNUMBER) = $RUN_DURATION"
-echo "B FIELD for current run ($RUNNUMBER) = $RUN_BFIELD"
+echo "B FIELD for current run ($RUNNUMBER) = $RUN_BFIELD (LOWFIELD = ${LOWFIELD})"
 echo "IR for current run ($RUNNUMBER) = $RUN_IR"
 if (( $(echo "$RUN_IR <= 0" | bc -l) )); then
   echo "Changing run IR to 1 Hz, because $RUN_IR makes no sense"
@@ -147,8 +151,7 @@ fi
 # other settings
 echo RUN = $RUNNUMBER
 if [[ $RUNNUMBER -ge 521889 ]]; then
-  export ARGS_EXTRA_PROCESS_o2_ctf_reader_workflow+=" --its-digits --mft-digits"
-  export DISABLE_DIGIT_CLUSTER_INPUT="--digits-from-upstream"
+  export ITSMFT_RECO_RERUN_CLUSTERIZER=1
   MAXBCDIFFTOMASKBIAS_ITS="ITSClustererParam.maxBCDiffToMaskBias=-10"    # this explicitly disables ITS masking
   MAXBCDIFFTOSQUASHBIAS_ITS="ITSClustererParam.maxBCDiffToSquashBias=10" # this explicitly enables ITS squashing
   MAXBCDIFFTOMASKBIAS_MFT="MFTClustererParam.maxBCDiffToMaskBias=-10"    # this explicitly disables MFT masking
@@ -333,6 +336,8 @@ if [[ "0$OLDVERSION" == "01" ]] && [[ $BEAMTYPE == "PbPb" || $PERIOD == "MAY" ||
   fi
 fi
 
+EXTRA_PRIMVTX_TimeMargin=""
+
 # some settings in common between workflows and affecting ITS-TPC matching
 : ${CUT_MATCH_CHI2:=250}
 if [[ $ALIGNLEVEL == 0 ]]; then
@@ -344,7 +349,12 @@ if [[ $ALIGNLEVEL == 0 ]]; then
 elif [[ $ALIGNLEVEL == 1 ]]; then
   ERRIB="100e-8"
   ERROB="100e-8"
-  [[ -z $TPCITSTIMEERR ]] && TPCITSTIMEERR="0.2"
+  if [[ $ALIEN_JDL_LPMANCHORYEAR == "2026" ]] ; then
+    [[ -z $TPCITSTIMEERR ]] && TPCITSTIMEERR="0.05"
+    EXTRA_PRIMVTX_TimeMargin="pvertexer.timeMarginVertexTime=0.3"
+  else
+    [[ -z $TPCITSTIMEERR ]] && TPCITSTIMEERR="0.2"
+  fi
   if [[ $ALIEN_JDL_LPMANCHORYEAR == "2023" && $BEAMTYPE == "PbPb" && $ANCHORED_PASS_NUMBER -lt 5 ]] || [[ $PERIOD == "LHC24al" ]] ; then
     [[ $ALIEN_JDL_LPMANCHORYEAR == "2023" ]] && [[ $BEAMTYPE == "PbPb" ]] && CUT_MATCH_CHI2=80 || CUT_MATCH_CHI2=100
     export ITSTPCMATCH="tpcitsMatch.safeMarginTimeCorrErr=2.;tpcitsMatch.XMatchingRef=60.;tpcitsMatch.cutMatchingChi2=$CUT_MATCH_CHI2;;tpcitsMatch.crudeAbsDiffCut[0]=6;tpcitsMatch.crudeAbsDiffCut[1]=6;tpcitsMatch.crudeAbsDiffCut[2]=0.3;tpcitsMatch.crudeAbsDiffCut[3]=0.3;tpcitsMatch.crudeAbsDiffCut[4]=2.5;tpcitsMatch.crudeNSigma2Cut[0]=64;tpcitsMatch.crudeNSigma2Cut[1]=64;tpcitsMatch.crudeNSigma2Cut[2]=64;tpcitsMatch.crudeNSigma2Cut[3]=64;tpcitsMatch.crudeNSigma2Cut[4]=64;"
@@ -552,10 +562,14 @@ if [[ $BEAMTYPE == "PbPb" ]]; then
   if [[ -z "$ALIEN_JDL_DISABLE_UPC" || $ALIEN_JDL_DISABLE_UPC != 1 ]]; then
     EXTRA_ITSRECO_CONFIG+=";ITSVertexerParam.nIterations=2;ITSCATrackerParam.doUPCIteration=true;"
   fi
+  if [[ $LOWFIELD == "1" ]]; then
+    EXTRA_ITSRECO_CONFIG+=";ITSCATrackerParam.minPt=2.5;"
+  fi
 elif [[ $BEAMTYPE == "pp" || $LIGHTNUCLEI == "1" ]]; then
   EXTRA_ITSRECO_CONFIG="ITSVertexerParam.phiCut=0.5;ITSVertexerParam.clusterContributorsCut=3;ITSVertexerParam.tanLambdaCut=0.2;"
   EXTRA_ITSRECO_CONFIG+=";ITSCATrackerParam.startLayerMask[0]=127;ITSCATrackerParam.startLayerMask[1]=127;ITSCATrackerParam.startLayerMask[2]=127;"
   EXTRA_ITSRECO_CONFIG+=";ITSCATrackerParam.minPtIterLgt[0]=0.05;ITSCATrackerParam.minPtIterLgt[1]=0.05;ITSCATrackerParam.minPtIterLgt[2]=0.05;ITSCATrackerParam.minPtIterLgt[3]=0.05;ITSCATrackerParam.minPtIterLgt[4]=0.05;ITSCATrackerParam.minPtIterLgt[5]=0.05;ITSCATrackerParam.minPtIterLgt[6]=0.05;ITSCATrackerParam.minPtIterLgt[7]=0.05;ITSCATrackerParam.minPtIterLgt[8]=0.05;ITSCATrackerParam.minPtIterLgt[9]=0.09;ITSCATrackerParam.minPtIterLgt[10]=0.167;ITSCATrackerParam.minPtIterLgt[11]=0.125;"
+  EXTRA_ITSRECO_CONFIG+=";ITSCATrackerParam.deltaRof=1;ITSVertexerParam.deltaRof=1;" # enable delta-rof tracking
 #  this is to impose old pp pT cuts (overriding hardcoded pbpb24 apass1 settings)
 #  EXTRA_ITSRECO_CONFIG+=";ITSCATrackerParam.minPtIterLgt[0]=0.05;ITSCATrackerParam.minPtIterLgt[1]=0.05;ITSCATrackerParam.minPtIterLgt[2]=0.05;ITSCATrackerParam.minPtIterLgt[3]=0.05;ITSCATrackerParam.minPtIterLgt[4]=0.05;ITSCATrackerParam.minPtIterLgt[5]=0.05;ITSCATrackerParam.minPtIterLgt[6]=0.05;ITSCATrackerParam.minPtIterLgt[7]=0.05;ITSCATrackerParam.minPtIterLgt[8]=0.05;ITSCATrackerParam.minPtIterLgt[9]=0.05;ITSCATrackerParam.minPtIterLgt[10]=0.05;ITSCATrackerParam.minPtIterLgt[11]=0.05;"
 fi
@@ -584,7 +598,6 @@ export ARGS_EXTRA_PROCESS_o2_tof_reco_workflow+=" --use-ccdb"
 # following comment https://alice.its.cern.ch/jira/browse/O2-2691?focusedCommentId=278262&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-278262
 #export PVERTEXER="pvertexer.acceptableScale2=9;pvertexer.minScale2=2.;pvertexer.nSigmaTimeTrack=4.;pvertexer.timeMarginTrackTime=0.5;pvertexer.timeMarginVertexTime=7.;pvertexer.nSigmaTimeCut=10;pvertexer.dbscanMaxDist2=36;pvertexer.dcaTolerance=3.;pvertexer.pullIniCut=100;pvertexer.addZSigma2=0.1;pvertexer.tukey=20.;pvertexer.addZSigma2Debris=0.01;pvertexer.addTimeSigma2Debris=1.;pvertexer.maxChi2Mean=30;pvertexer.timeMarginReattach=3.;pvertexer.addTimeSigma2Debris=1.;pvertexer.dbscanDeltaT=24;pvertexer.maxChi2TZDebris=100;pvertexer.maxMultRatDebris=1.;pvertexer.dbscanAdaptCoef=20.;pvertexer.timeMarginVertexTime=1.3"
 # updated on 7 Sept 2022
-EXTRA_PRIMVTX_TimeMargin=""
 if [[ $BEAMTYPE == "PbPb" || $PERIOD == "MAY" || $PERIOD == "JUN" || $PERIOD == LHC22* || $PERIOD == LHC23* ]]; then
   EXTRA_PRIMVTX_TimeMargin="pvertexer.timeMarginVertexTime=1.3"
 fi
@@ -760,6 +773,16 @@ if [[ $ADD_CALIB == "1" ]]; then
   fi
   if [[ $ALIEN_JDL_DOUPLOADSLOCALLY == 1 ]]; then
     export CCDB_POPULATOR_UPLOAD_PATH="file://$PWD"
+  fi
+
+  # enable time gain calibration
+  if [[ $ALIEN_JDL_DOTPCTIMEGAINCALIB == 1 ]]; then
+    echo "Enabling TPC time gain calibration"
+    export CALIB_TPC_TIMEGAIN=1
+    export ARGS_EXTRA_PROCESS_o2_tpc_calibrator_dedx+=" --dump-histograms 1 --min-entries 1" # write full calibration objects for time gain without rejecting low statistics timeslots
+    export ARGS_EXTRA_PROCESS_o2_tpc_miptrack_filter+=" --use-global-tracks"
+    export SCALEEVENTS_TPC_TIMEGAIN=${SCALEEVENTS_TPC_TIMEGAIN:-1} # use all TFs
+    export SCALETRACKS_TPC_TIMEGAIN=${SCALETRACKS_TPC_TIMEGAIN:--1} # use all tracks
   fi
 fi
 
