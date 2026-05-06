@@ -5,7 +5,7 @@ vdecaymode 2      !(1:electronic decay, 2: muonic decay, 3: tauonic decay)
 ! Random number generator initializing parameters
 iseed 0         ! initialize random number sequence
 
-numevts 1000    ! number of events to be generated
+numevts 2000    ! number of events to be generated
 ih1   1           ! hadron 1 (1 for protons, -1 for antiprotons)
 ih2   1           ! hadron 2 (1 for protons, -1 for antiprotons)
 ! ndns1 131         ! pdf set for hadron 1 (mlm numbering)
