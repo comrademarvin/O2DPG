@@ -302,6 +302,9 @@ elif readout_detectors != 'all' and activeDetectors != 'all':
 activeDetectors = { det:1 for det in activeDetectors.split(',') if det not in args.skipModules and det not in args.skipReadout}
 for det in activeDetectors:
     activate_detector(det)
+for det in args.skipModules:
+    print(f"Skipping detector {det} in simulation")
+    deactivate_detector(det)
 
 # function to finalize detector source lists based on activeDetectors
 # detector source lists are comma separated lists of DET1, DET2, DET1-DET2, ...
@@ -669,10 +672,10 @@ PreCollContextTask['cmd'] = task_finalizer([
       f'--timestamp {args.timestamp}',
       f'--import-external {args.data_anchoring}' if len(args.data_anchoring) > 0 else None,
       '--bcPatternFile ccdb',
+      ' --nontrivial-mu-distribution ccdb://https://alice-ccdb.cern.ch/FTO/Calib/EventsPerBc',
       f'--QEDinteraction {qedspec}' if includeQED else None
       ], configname = 'precollcontext')
 workflow['stages'].append(PreCollContextTask)
-#TODO: in future add standard ' --nontrivial-mu-distribution ccdb://http://ccdb-test.cern.ch:8080/GLO/CALIB/EVSELQA/HBCTVX'
 
 if doembedding:
     if not usebkgcache:
@@ -1227,7 +1230,7 @@ for tf in range(1, NTIMEFRAMES + 1):
       getDPL_global_options(), 
       f'-n {args.ns}', 
       simsoption,
-      '--onlyDet FT0,FV0,EMC,CTP', 
+      '--onlyDet ' + ','.join([det for det in ['FT0', 'FV0', 'EMC', 'CTP'] if isActive(det)]),
       f'--interactionRate {INTRATE}',
       f'--incontext {CONTEXTFILE}',
       f'--store-ctp-lumi {CTPSCALER}',
@@ -1387,7 +1390,6 @@ for tf in range(1, NTIMEFRAMES + 1):
    ITSRECOtask['cmd'] = task_finalizer([
      "${O2_ROOT}/bin/o2-its-reco-workflow" if args.detectorList == 'ALICE2' else "${O2_ROOT}/bin/o2-its3-reco-workflow",
      getDPL_global_options(bigshm=havePbPb),
-     '--trackerCA' if args.detectorList == 'ALICE2' else '',
      '--tracking-mode async',
      putConfigValues(["ITSVertexerParam", 
                       "ITSAlpideParam",
