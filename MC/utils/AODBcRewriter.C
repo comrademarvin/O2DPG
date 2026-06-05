@@ -14,8 +14,9 @@
 //
 // This tool fixes all three problems in one pass per DF_ directory:
 //
-//   Stage 0  — Sort & deduplicate the BC table.  Build BC permutation map:
-//              bcPerm[oldBCrow] = newBCrow.
+//   Stage 0  — Deduplicate the BC table in place (order-preserving; the input
+//              must already be globalBC-sorted).  Build BC permutation map:
+//              bcPerm[oldBCrow] = newBCrow (monotonic non-decreasing).
 //
 //   Stage 1  — Process every table that carries fIndexBCs / fIndexBC.
 //              Remap the index via bcPerm, sort rows by the new index, and
@@ -73,6 +74,7 @@
 #include "TROOT.h"
 #include "TString.h"
 #include "TTree.h"
+#include "TGrid.h"
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
@@ -130,6 +132,45 @@ static const char *collIndexBranch(TTree *t) {
   if (!t) return nullptr;
   if (t->GetBranch("fIndexCollisions")) return "fIndexCollisions";
   return nullptr;
+}
+
+// ----------------------------------------------------------------------------
+// Paste-join relationships (authoritative; derived from AnalysisDataModel.h
+// comments such as "Table joined to the collision table containing the MC
+// index" and from the SOA EXTENDED_TABLE declarations for cov / extra tables).
+//
+// A paste-joined CHILD has NO row of its own — its row N corresponds to row N
+// of its PARENT.  If the parent is reordered or has rows dropped, the child
+// must follow row-for-row to preserve the 1:1 alignment.  Any index columns
+// the child carries (e.g. fIndexMcCollisions in O2mccollisionlabel) are then
+// remapped *value-wise* via the appropriate parent stage's permutation, but
+// rows are NEVER added or dropped on the child's own initiative.
+//
+// Matching uses TString::BeginsWith on the child name; parent matching uses
+// allPerms keys (so versioned names like O2collision_001 resolve via prefix).
+// When several parent candidates are listed for the same child, the first one
+// found in allPerms wins (this lets us prefer O2track_iu over O2track).
+static const std::vector<std::pair<std::string,std::string>> kPasteJoins = {
+  // { paste-joined child prefix,    parent prefix }
+  { "O2bcflag",            "O2bc"          },  // BCFlags joinable with BCs
+  { "O2mccollisionlabel",  "O2collision"   },  // McCollisionLabels  -> Collisions
+  { "O2mctracklabel",      "O2track_iu"    },  // McTrackLabels      -> Tracks (prefer _iu)
+  { "O2mctracklabel",      "O2track"       },
+  { "O2mcfwdtracklabel",   "O2fwdtrack"    },  // McFwdTrackLabels   -> FwdTracks
+  { "O2mcmfttracklabel",   "O2mfttrack"    },  // McMFTTrackLabels   -> MFTTracks
+  { "O2mccalolabel",       "O2calo"        },  // McCaloLabels       -> Calos
+  { "O2trackcov_iu",       "O2track_iu"    },  // TracksCovIU        -> TracksIU (cov)
+  { "O2trackextra",        "O2track_iu"    },  // TracksExtra        -> TracksIU
+  { "O2fwdtrackcov",       "O2fwdtrack"    },  // FwdTracksCov       -> FwdTracks
+  // Note: O2mfttrackcov has its own fIndexMFTTracks column — it is NOT
+  //       paste-joined and must NOT be listed here.
+};
+
+// True if the given tree name matches any registered paste-join child prefix.
+static bool isPasteJoinChild(const std::string &tname) {
+  for (auto &kv : kPasteJoins)
+    if (TString(tname.c_str()).BeginsWith(kv.first.c_str())) return true;
+  return false;
 }
 
 // ============================================================================
@@ -461,18 +502,31 @@ static PermMap rewriteTable(TTree *src, TDirectory *dirOut,
 }
 
 // ============================================================================
-// SECTION 4 — Stage 0: BC table sort + deduplication
+// SECTION 4 — Stage 0: BC table deduplication (order-preserving)
 // ============================================================================
 //
-// Reads fGlobalBC from the BC tree, sorts rows, drops exact-duplicate BC
-// values, and writes the compacted table.  Returns bcPerm[oldRow] = newRow.
+// Reads fGlobalBC from the BC tree, drops exact-duplicate BC values IN PLACE
+// (preserving input row order), and writes the compacted table.  Returns
+// bcPerm[oldRow] = newRow.
+//
+// The dedup is deliberately order-preserving so that bcPerm is monotonic
+// non-decreasing.  This matters because every BC-indexed table (collisions,
+// FT0/FV0/FDD/Zdc, ...) is sliced per BC and must stay sorted by its fIndexBCs,
+// and collisions are in turn the grouping anchor for tracks (sorted by
+// fIndexCollisions).  A non-order-preserving BC remap would force a full reorder
+// cascade BC -> collisions -> tracks to keep all those groupings valid; keeping
+// bcPerm monotonic means none of those tables need to be reordered at all.
+//
+// This REQUIRES the input BC table to already be sorted by fGlobalBC (the
+// standard AO2D invariant; also asserted on the output by validateDF check #1).
+// We assert it loudly rather than silently emit a non-monotonic BC table.
 
 struct BCStage0Result {
-  PermMap bcPerm;          // bcPerm[oldRow] = newRow in sorted/deduped BC table
+  PermMap bcPerm;          // bcPerm[oldRow] = newRow in the deduped BC table
   Long64_t nUnique = 0;
 };
 
-static BCStage0Result stage0_sortBCs(TTree *treeBCs, TDirectory *dirOut) {
+static BCStage0Result stage0_dedupBCs(TTree *treeBCs, TDirectory *dirOut) {
   BCStage0Result res;
   Long64_t n = treeBCs->GetEntries();
   if (n == 0) return res;
@@ -485,19 +539,29 @@ static BCStage0Result stage0_sortBCs(TTree *treeBCs, TDirectory *dirOut) {
   std::vector<ULong64_t> gbcs(n);
   for (Long64_t i = 0; i < n; ++i) { treeBCs->GetEntry(i); gbcs[i] = gbc; }
 
-  // Sort row indices by fGlobalBC
-  std::vector<Long64_t> order(n);
-  std::iota(order.begin(), order.end(), 0);
-  std::stable_sort(order.begin(), order.end(),
-    [&](Long64_t a, Long64_t b){ return gbcs[a] < gbcs[b]; });
+  // The BC table must already be sorted by fGlobalBC: the dedup below is
+  // order-preserving (merges only adjacent equal-globalBC rows), which keeps
+  // bcPerm monotonic and avoids a reorder cascade through collisions/tracks.
+  // A non-monotonic input would silently break that guarantee, so abort loudly.
+  for (Long64_t i = 1; i < n; ++i) {
+    if (gbcs[i] < gbcs[i - 1]) {
+      std::cerr << "FATAL: O2bc_* table is not sorted by fGlobalBC (row " << i
+                << " globalBC=" << gbcs[i] << " < row " << (i - 1)
+                << " globalBC=" << gbcs[i - 1] << ").\n"
+                << "       AODBcRewriter requires a globalBC-sorted BC table so that\n"
+                << "       BC deduplication is order-preserving; aborting.\n";
+      std::abort();
+    }
+  }
 
-  // Build deduplicated row list and the permutation
+  // Build the deduplicated row list and the (monotonic) permutation in source
+  // row order: adjacent rows sharing a globalBC collapse onto one output row.
   res.bcPerm.assign(n, -1);
   std::vector<Long64_t> rowOrder;  // source rows to keep, in output order
-  ULong64_t prev = ULong64_t(-1);
+  ULong64_t prev = 0;
   Int_t newRow = -1;
-  for (Long64_t srcRow : order) {
-    if (gbcs[srcRow] != prev) {
+  for (Long64_t srcRow = 0; srcRow < n; ++srcRow) {
+    if (newRow < 0 || gbcs[srcRow] != prev) {
       ++newRow;
       prev = gbcs[srcRow];
       rowOrder.push_back(srcRow);
@@ -507,7 +571,7 @@ static BCStage0Result stage0_sortBCs(TTree *treeBCs, TDirectory *dirOut) {
   }
   res.nUnique = rowOrder.size();
 
-  std::cout << "  BC stage: " << n << " rows -> " << res.nUnique << " unique\n";
+  std::cout << "  BC stage: " << n << " rows -> " << res.nUnique << " unique (in-place dedup)\n";
 
   // Write the BC table (no index remapping needed for the table itself)
   rewriteTable(treeBCs, dirOut, rowOrder, /*indexBranch=*/"", /*parentPerm=*/{});
@@ -691,6 +755,16 @@ stage2_MCCollIndexedTables(TDirectory *dirIn, TDirectory *dirOut,
     const char *idxBr = mcCollIndexBranch(src);
     if (!idxBr) continue;
 
+    // A paste-join child (e.g. O2mccollisionlabel) MUST follow its parent's
+    // row order and never drop rows on its own.  Defer it to
+    // processPasteJoinTables, which will remap any of its own index columns
+    // (fIndexMcCollisions, ...) value-wise without touching the row count.
+    if (isPasteJoinChild(tname)) {
+      std::cout << "  Stage2: deferring paste-join child " << tname
+                << " to paste-join handler\n";
+      continue;
+    }
+
     std::cout << "  Stage2 [MCColl-indexed]: " << tname << "\n";
 
     Long64_t nSrc = src->GetEntries();
@@ -760,20 +834,23 @@ stage2_MCCollIndexedTables(TDirectory *dirIn, TDirectory *dirOut,
 // SECTION 8 — Paste-join table handling
 // ============================================================================
 //
-// A paste-joined table has NO index column.  Its row N corresponds to row N
-// of its parent table.  When the parent is reordered, the paste-join table
-// must follow with the identical row permutation.
+// A paste-joined CHILD has no row of its own — its row N corresponds to row N
+// of its PARENT table.  When the parent is reordered, the child must follow
+// row-for-row to preserve the 1:1 alignment.  Paste-join children may still
+// carry their own index columns; those values are remapped in-place via the
+// appropriate parent-stage permutation.
 //
-// Known paste-join relationships in the AO2D data model
-// (parent table prefix -> paste-joined table prefix):
+// The list of paste-join pairs is in kPasteJoins (Section 1).
 //
-//   O2collision_*           -> O2mccollisionlabel_*
-//   O2track_*               -> O2mctracklabel_*
-//   O2trackiu_*             -> O2mctracklabel_*   (alternative track table)
-//   O2fwdtrack_*            -> O2mcfwdtracklabel_*
-//   O2mfttrack_*            -> O2mcmfttracklabel_*
+// Index columns we know how to remap in a child:
+//   fIndexMcCollisions       -> via mcCollPerm
+//   fIndexCollisions         -> via collPerm
+//   fIndexMcParticles        -> via mcParticlePerm
+//   fIndexArrayMcParticles   -> via mcParticlePerm (VLA)
 //
-// The PermMap from the parent stage is used directly as the row order.
+// When the named parent is not in allPerms (e.g. tracks aren't reordered in
+// this build), the child is processed with identity row order so the
+// value-wise remaps still apply but the row order is unchanged.
 
 // Build the row order from a PermMap (srcRow -> outRow), inverted.
 static std::vector<Long64_t> rowOrderFromPerm(const PermMap &perm) {
@@ -790,34 +867,133 @@ static std::vector<Long64_t> rowOrderFromPerm(const PermMap &perm) {
   return order;
 }
 
-// The paste-join map: paste-joined table prefix -> parent table prefix
-// We match by prefix (BeginsWith) because table names carry a numeric suffix.
-static const std::vector<std::pair<std::string,std::string>> kPasteJoins = {
-  // { paste-joined prefix,        parent prefix }
-  { "O2mccollisionlabel",  "O2collision"   },
-  { "O2mctracklabel",      "O2track"       },
-  { "O2mctracklabel",      "O2trackiu"     },  // same label table, alt parent
-  { "O2mcfwdtracklabel",   "O2fwdtrack"    },
-  { "O2mcmfttracklabel",   "O2mfttrack"    },
-};
+// Locate a permutation in allPerms whose key begins with a given prefix.
+// Returns nullptr if none found.
+static const PermMap *findPermByPrefix(
+    const std::unordered_map<std::string, PermMap> &allPerms,
+    const char *prefix,
+    std::string *foundName = nullptr) {
+  for (auto &[name, perm] : allPerms) {
+    if (TString(name.c_str()).BeginsWith(prefix)) {
+      if (foundName) *foundName = name;
+      return &perm;
+    }
+  }
+  return nullptr;
+}
+
+// ============================================================================
+// SECTION 9b — Stage 1b: Collision-grouped track tables
+// ============================================================================
+//
+// The primary track tables (O2track_iu, O2mfttrack_*, O2fwdtrack) are GROUPED
+// by collision.  O2's slicing cache (ArrowTableSlicingCache::validateOrder)
+// requires every fIndexCollisions group — including the "-1" ambiguous group —
+// to be a single contiguous run; otherwise it aborts with
+//   "Table ... index fIndexCollisions has a group with index -1 that is split".
+//
+// When several MC sub-timeframes are merged into one DF_ folder (data-embedding
+// anchoring, which stores MC timeframes under the same DF_ as the parent data
+// file), each sub-frame contributes its own [collision-grouped][-1 ambiguous]
+// block.  Concatenating them splits the -1 group into N runs, so the table is
+// no longer sliceable.  Stage 1 only reorders BC-indexed tables, and tracks are
+// otherwise written in input row order, so the split survives into the output.
+//
+// This stage re-establishes the grouping: it reorders each collision-grouped
+// track table by its remapped fIndexCollisions (stable, with -1 sinking to the
+// end so the ambiguous group is one contiguous run — matching the Stage 1
+// convention) and publishes the resulting row permutation.  Downstream:
+//   * paste-join children (O2trackextra, O2trackcov_iu, O2mctracklabel, ...)
+//     follow the published parent permutation;
+//   * every fIndexTracks* / fIndexMFTTracks / fIndexFwdTracks reference is
+//     remapped through it in processPasteJoinTables.
+static bool isCollGroupedTrackTable(const std::string &tname) {
+  static const char *kPrefixes[] = {"O2track_iu", "O2track",
+                                     "O2mfttrack", "O2fwdtrack"};
+  for (auto *p : kPrefixes)
+    if (TString(tname.c_str()).BeginsWith(p)) return true;
+  return false;
+}
+
+static void stage1b_reorderTrackTables(
+    TDirectory *dirIn, TDirectory *dirOut,
+    std::unordered_map<std::string, PermMap> &allPerms,
+    std::unordered_set<std::string> &written) {
+
+  const PermMap *collPermP = findPermByPrefix(allPerms, "O2collision_");
+  if (!collPermP) return;  // no collisions present — nothing to regroup against
+
+  TIter it(dirIn->GetListOfKeys());
+  while (TKey *key = static_cast<TKey *>(it())) {
+    if (TString(key->GetClassName()) != "TTree") continue;
+    std::unique_ptr<TObject> obj(key->ReadObj());
+    TTree *src = dynamic_cast<TTree *>(obj.get());
+    if (!src) continue;
+
+    std::string tname = src->GetName();
+    if (written.count(tname)) continue;       // BC-indexed tracks etc. already done
+    if (!isCollGroupedTrackTable(tname)) continue;
+    if (isPasteJoinChild(tname)) continue;    // children follow their parent below
+    if (!src->GetBranch("fIndexCollisions")) continue;
+
+    std::cout << "  Stage1b [coll-grouped]: " << tname << "\n";
+
+    Long64_t nSrc = src->GetEntries();
+    TBranch *inIdxBr = src->GetBranch("fIndexCollisions");
+    TLeaf *idxLeaf = static_cast<TLeaf *>(inIdxBr->GetListOfLeaves()->At(0));
+    ScalarTag idxTag = tagOf(idxLeaf);
+    std::vector<unsigned char> idxBuf(byteSize(idxTag), 0);
+    inIdxBr->SetAddress(idxBuf.data());
+
+    struct SortEntry { Long64_t newColl; Long64_t srcRow; };
+    std::vector<SortEntry> entries;
+    entries.reserve(nSrc);
+    for (Long64_t i = 0; i < nSrc; ++i) {
+      inIdxBr->GetEntry(i);
+      Long64_t oldColl = readAsInt(idxBuf.data(), idxTag);
+      Long64_t newColl = (oldColl >= 0 && oldColl < (Long64_t)collPermP->size())
+                         ? (*collPermP)[oldColl] : -1;
+      entries.push_back({newColl, i});
+    }
+    // Stable-sort by remapped collision; the ambiguous group (-1) sinks to the
+    // end as a single contiguous run.  Stable keeps the within-collision order.
+    std::stable_sort(entries.begin(), entries.end(),
+      [](const SortEntry &a, const SortEntry &b){
+        if (a.newColl < 0 && b.newColl >= 0) return false;
+        if (a.newColl >= 0 && b.newColl < 0) return true;
+        return a.newColl < b.newColl;
+      });
+    std::vector<Long64_t> rowOrder;
+    rowOrder.reserve(nSrc);
+    for (auto &e : entries) rowOrder.push_back(e.srcRow);
+
+    // Reorder rows and remap fIndexCollisions values through collPerm.
+    PermMap perm = rewriteTable(src, dirOut, rowOrder, "fIndexCollisions", *collPermP);
+    allPerms[tname] = std::move(perm);
+    written.insert(tname);
+  }
+}
 
 static void processPasteJoinTables(
     TDirectory *dirIn, TDirectory *dirOut,
     const std::unordered_map<std::string, PermMap> &allPerms,
-    const std::unordered_set<std::string> &alreadyWritten) {
+    const std::unordered_set<std::string> &alreadyWritten,
+    const PermMap *bcPermP = nullptr) {
 
-  // Find the MC-particle permutation (produced by stage2 for O2mcparticle_*).
-  // Label tables (O2mctracklabel, O2mcfwdtracklabel, O2mcmfttracklabel,
-  // O2mccalolabel) carry fIndexMcParticles / fIndexArrayMcParticles that must
-  // be remapped via this permutation regardless of whether the label table's
-  // row order changes.
-  const PermMap *mcParticlePerm = nullptr;
-  for (auto &[name, perm] : allPerms) {
-    if (TString(name.c_str()).BeginsWith("O2mcparticle")) {
-      mcParticlePerm = &perm;
-      break;
-    }
-  }
+  // Pre-locate the parent permutations that paste-join children may want to
+  // apply to their own index columns.  Any of these may legitimately be null
+  // (e.g. mcParticlePerm absent if there is no O2mcparticle in this DF).
+  const PermMap *mcParticlePerm = findPermByPrefix(allPerms, "O2mcparticle");
+  const PermMap *mcCollPermP    = findPermByPrefix(allPerms, "O2mccollision_");
+  const PermMap *collPermP      = findPermByPrefix(allPerms, "O2collision_");
+  // Track tables reordered in Stage 1b: every reference into them must be
+  // remapped through their permutation (null if the table is absent / wasn't
+  // reordered, in which case no remap is needed).
+  const PermMap *trkPerm        = findPermByPrefix(allPerms, "O2track_iu");
+  const PermMap *mftPerm        = findPermByPrefix(allPerms, "O2mfttrack");
+  const PermMap *fwdPerm        = findPermByPrefix(allPerms, "O2fwdtrack");
+  // bcPermP is passed in from processDF (the BC table is the only stage
+  // whose permutation isn't already published in allPerms).
 
   TIter it(dirIn->GetListOfKeys());
   while (TKey *key = static_cast<TKey *>(it())) {
@@ -829,10 +1005,14 @@ static void processPasteJoinTables(
     std::string tname = src->GetName();
     if (alreadyWritten.count(tname)) continue;
     if (isBCTable(tname.c_str())) continue;
-    if (bcIndexBranch(src) || mcCollIndexBranch(src)) continue;
+    // Stage-1 BC-indexed and Stage-2 MCColl-indexed non-paste-join tables are
+    // already in alreadyWritten.  A paste-join child carrying its own MCColl
+    // index (e.g. O2mccollisionlabel) was deferred from stage2 and lands here.
+    if (bcIndexBranch(src)) continue;
+    if (mcCollIndexBranch(src) && !isPasteJoinChild(tname)) continue;
 
-    // Build extra remaps for any fIndexMcParticles / fIndexArrayMcParticles
-    // branches in this table (label tables pointing into O2mcparticle).
+    // Build value-wise extra remaps for any index column this table carries
+    // that points into a table whose row order may have changed.
     std::vector<ExtraRemap> extraRemaps;
     if (mcParticlePerm) {
       if (src->GetBranch("fIndexMcParticles"))
@@ -840,19 +1020,49 @@ static void processPasteJoinTables(
       if (src->GetBranch("fIndexArrayMcParticles"))
         extraRemaps.push_back({"fIndexArrayMcParticles", mcParticlePerm});
     }
+    if (mcCollPermP && src->GetBranch("fIndexMcCollisions"))
+      extraRemaps.push_back({"fIndexMcCollisions",     mcCollPermP});
+    if (collPermP && src->GetBranch("fIndexCollisions"))
+      extraRemaps.push_back({"fIndexCollisions",       collPermP});
+    if (bcPermP) {
+      // BC-pointing indices that weren't already remapped in Stage 1.
+      // Stage-1 BC-indexed tables (with fIndexBCs / fIndexBC) are in
+      // alreadyWritten by now, so this only fires for tables that escaped
+      // Stage 1 — chiefly the O2ambiguous* family, which carries the SOA
+      // SLICE_INDEX_COLUMN(BC, bc) stored on disk as fIndexSliceBCs[2]/I.
+      // After BC dedup the slice endpoints would otherwise point past the
+      // compacted BC table; remapping through bcPerm fixes this.
+      if (src->GetBranch("fIndexSliceBCs"))
+        extraRemaps.push_back({"fIndexSliceBCs",        bcPermP});
+      if (src->GetBranch("fIndexBCs"))
+        extraRemaps.push_back({"fIndexBCs",             bcPermP});
+      if (src->GetBranch("fIndexBC"))
+        extraRemaps.push_back({"fIndexBC",              bcPermP});
+    }
 
-    // Check if this is a known paste-join table
+    // Track-pointing indices: the track tables may have been reordered in
+    // Stage 1b, so every reference into them must be remapped through the
+    // corresponding permutation.  (No-op when the perm is null / absent.)
+    auto addTrkRemap = [&](const char *br, const PermMap *pm) {
+      if (pm && src->GetBranch(br)) extraRemaps.push_back({br, pm});
+    };
+    addTrkRemap("fIndexTracks",                  trkPerm);
+    addTrkRemap("fIndexTracks_0",                trkPerm);
+    addTrkRemap("fIndexTracks_1",                trkPerm);
+    addTrkRemap("fIndexTracks_2",                trkPerm);
+    addTrkRemap("fIndexTracks_Pos",              trkPerm);
+    addTrkRemap("fIndexTracks_Neg",              trkPerm);
+    addTrkRemap("fIndexTracks_ITS",              trkPerm);
+    addTrkRemap("fIndexMFTTracks",               mftPerm);
+    addTrkRemap("fIndexFwdTracks",               fwdPerm);
+    addTrkRemap("fIndexFwdTracks_MatchMCHTrack", fwdPerm);
+
+    // Find a paste-join parent for this table (kPasteJoins lookup).
     const PermMap *parentPerm = nullptr;
     std::string parentName;
     for (auto &[pastePrefix, parentPrefix] : kPasteJoins) {
       if (!TString(tname.c_str()).BeginsWith(pastePrefix.c_str())) continue;
-      for (auto &[pname, perm] : allPerms) {
-        if (TString(pname.c_str()).BeginsWith(parentPrefix.c_str())) {
-          parentPerm = &perm;
-          parentName = pname;
-          break;
-        }
-      }
+      parentPerm = findPermByPrefix(allPerms, parentPrefix.c_str(), &parentName);
       if (parentPerm) break;
     }
 
@@ -870,10 +1080,11 @@ static void processPasteJoinTables(
       } else {
         rewriteTable(src, dirOut, rowOrder, "", {}, extraRemaps);
       }
-    } else if (!extraRemaps.empty()) {
-      // Not paste-joined but has indices that need remapping (e.g. O2mccalolabel
-      // which is not in kPasteJoins but carries fIndexArrayMcParticles).
-      std::cout << "  Remap-only: " << tname << "\n";
+    } else if (!extraRemaps.empty() || isPasteJoinChild(tname)) {
+      // Parent wasn't reordered (or not present in this DF) — keep row order
+      // identical but still apply value-wise index remaps and follow the
+      // paste-join 1:1 invariant by going through the identity row order.
+      std::cout << "  Identity-order remap: " << tname << "\n";
       Long64_t n = src->GetEntries();
       std::vector<Long64_t> identity(n);
       std::iota(identity.begin(), identity.end(), 0LL);
@@ -948,10 +1159,10 @@ static void processDF(TDirectory *dirIn, TDirectory *dirOut) {
     return;
   }
 
-  // ---- Stage 0: sort & deduplicate BCs ----
+  // ---- Stage 0: deduplicate BCs (order-preserving) ----
   std::cout << "-- Stage 0: BCs --\n";
   dirOut->cd();
-  BCStage0Result s0 = stage0_sortBCs(treeBCs, dirOut);
+  BCStage0Result s0 = stage0_dedupBCs(treeBCs, dirOut);
   if (treeFlags) stage0_copyBCFlags(treeFlags, dirOut, s0.bcPerm);
 
   // Track which tree names have been written so we don't double-write
@@ -984,9 +1195,16 @@ static void processDF(TDirectory *dirIn, TDirectory *dirOut) {
     std::cout << "  (no MCCollision table found — skipping stage 2)\n";
   }
 
+  // ---- Stage 1b: regroup collision-grouped track tables ----
+  // Must run after Stage 1 (needs the collision permutation) and before the
+  // paste-join stage (so children follow the new track order and fIndexTracks*
+  // references are remapped).  Publishes track permutations into stage1Perms.
+  std::cout << "-- Stage 1b: collision-grouped track tables --\n";
+  stage1b_reorderTrackTables(dirIn, dirOut, stage1Perms, written);
+
   // ---- Paste-join tables + unrelated tables ----
   std::cout << "-- Paste-join and unrelated tables --\n";
-  processPasteJoinTables(dirIn, dirOut, stage1Perms, written);
+  processPasteJoinTables(dirIn, dirOut, stage1Perms, written, &s0.bcPerm);
 
   // ---- Non-tree objects (TMap metadata) ----
   copyNonTreeObjects(dirIn, dirOut);
@@ -1002,14 +1220,109 @@ static void processDF(TDirectory *dirIn, TDirectory *dirOut) {
 //   1. BC table is strictly monotonic in fGlobalBC.
 //   2. MC particle intra-table daughter/mother indices are in range and point
 //      to particles belonging to the same MC collision.
-//   3. fIndexMcParticles in label tables is in range.
+//   3. Every paste-joined child table has the same row count as its parent
+//      (e.g. O2mccollisionlabel matches O2collision).
+//   4. Every fIndex* value across the DF is in range w.r.t. its referent
+//      table (value -1 is always permitted as the "no link" sentinel).
 //
-// Returns true if all checks pass.  Prints a summary to stdout.
+// Returns true if all checks pass.  Prints [FAIL] lines for each violation.
+
+// Map from fIndex* branch name to the table-name prefix it refers to.  The
+// match on the referent side uses TString::BeginsWith so versioned suffixes
+// (O2collision_001, O2bc_001, ...) are handled.  Branches not in this list
+// are skipped by the range check (this includes O2mcparticle's intra-table
+// fIndexArray_Mothers / fIndexSlice_Daughters, which are checked separately
+// with stricter semantics in the MC-particle block).
+static const std::vector<std::pair<std::string,std::string>> kIndexBranchToTable = {
+  { "fIndexBCs",              "O2bc_"          },
+  { "fIndexBC",               "O2bc_"          },
+  { "fIndexSliceBCs",         "O2bc_"          },
+  { "fIndexCollisions",       "O2collision_"   },
+  { "fIndexCollision",        "O2collision_"   },
+  { "fIndexMcCollisions",     "O2mccollision_" },
+  { "fIndexMcParticles",      "O2mcparticle"   },
+  { "fIndexArrayMcParticles", "O2mcparticle"   },
+  { "fIndexTracks",           "O2track_iu"     },
+  { "fIndexTracks_0",         "O2track_iu"     },
+  { "fIndexTracks_1",         "O2track_iu"     },
+  { "fIndexTracks_2",         "O2track_iu"     },
+  { "fIndexTracks_Pos",       "O2track_iu"     },
+  { "fIndexTracks_Neg",       "O2track_iu"     },
+  { "fIndexTracks_ITS",       "O2track_iu"     },
+  { "fIndexFwdTracks",                       "O2fwdtrack"  },
+  { "fIndexFwdTracks_MatchMCHTrack",         "O2fwdtrack"  },
+  { "fIndexMFTTracks",        "O2mfttrack"     },
+  { "fIndexV0s",              "O2v0_"          },
+  { "fIndexCascades",         "O2cascade_"     },
+  { "fIndexDecay3Bodys",      "O2decay3body"   },
+};
+
+// Find a tree in d whose name begins with the given prefix.  Returns the
+// number of entries, or -1 if not found.
+static Long64_t treeEntriesByPrefix(TDirectory *d, const char *prefix) {
+  TIter it(d->GetListOfKeys());
+  TKey *k;
+  while ((k = (TKey*)it())) {
+    if (!TString(k->GetName()).BeginsWith(prefix)) continue;
+    TObject *obj = d->Get(k->GetName());
+    if (!obj || !obj->InheritsFrom(TTree::Class())) continue;
+    return ((TTree*)obj)->GetEntries();
+  }
+  return -1;
+}
+
+// Generic in-range check for every fIndex* branch listed above.  Reads the
+// branch's leaf (scalar, fixed-array, or VLA), iterates all entries, and
+// counts how many values are outside [-1, nReferent).
+static Long64_t checkIndexRange(TTree *t, const char *branchName,
+                                Long64_t nReferent) {
+  TBranch *br = t->GetBranch(branchName);
+  if (!br) return 0;
+  TLeaf *leaf = (TLeaf*)br->GetListOfLeaves()->At(0);
+  if (!leaf) return 0;
+  if (TString(leaf->GetTypeName()) != "Int_t") return 0; // only Int_t indices
+
+  TLeaf *cntLeaf = leaf->GetLeafCount();   // VLA?
+  int    fixedN = leaf->GetLen();          // 1 for scalar, >1 for fixed array
+
+  // Allocate worst-case buffer.  For a VLA we need a prescan to size it.
+  Long64_t maxLen = fixedN;
+  if (cntLeaf) {
+    // simple prescan
+    Int_t cnt = 0;
+    TBranch *cntBr = cntLeaf->GetBranch();
+    cntBr->SetAddress(&cnt);
+    for (Long64_t i = 0; i < t->GetEntries(); ++i) {
+      cntBr->GetEntry(i);
+      if (cnt > maxLen) maxLen = cnt;
+    }
+  }
+  std::vector<Int_t> buf(std::max<Long64_t>(1, maxLen), 0);
+  Int_t  cnt = fixedN;
+  TBranch *cntBr = cntLeaf ? cntLeaf->GetBranch() : nullptr;
+  br->SetAddress(buf.data());
+  if (cntBr) cntBr->SetAddress(&cnt);
+
+  Long64_t bad = 0;
+  for (Long64_t i = 0; i < t->GetEntries(); ++i) {
+    br->GetEntry(i);
+    if (cntBr) cntBr->GetEntry(i);
+    int n = cntBr ? (int)cnt : fixedN;
+    for (int j = 0; j < n; ++j) {
+      Int_t v = buf[j];
+      if (v < -1)            { ++bad; continue; }
+      if (v >= (Int_t)nReferent) { ++bad; continue; }
+    }
+  }
+  br->ResetAddress();
+  if (cntBr) cntBr->ResetAddress();
+  return bad;
+}
 
 static bool validateDF(TDirectory *d) {
   bool ok = true;
 
-  // ---- BC monotonicity ----
+  // ---- discover key trees ----
   TIter it(d->GetListOfKeys());
   TKey *k;
   TTree *bcTree = nullptr;
@@ -1084,6 +1397,47 @@ static bool validateDF(TDirectory *d) {
     mcpTree->SetBranchStatus("*", 1);
   }
 
+  // ---- Paste-join row-count parity ----
+  // For every (child, parent) pair in kPasteJoins, if both are present in the
+  // DF their row counts must be identical.  This catches the class of bugs
+  // where a child was sorted/dropped on its own index (e.g. a previous
+  // version dropped O2mccollisionlabel rows on MC-collision dedup while
+  // leaving O2collision_001 intact, producing an off-by-N mismatch).
+  for (auto &[childPrefix, parentPrefix] : kPasteJoins) {
+    Long64_t nChild  = treeEntriesByPrefix(d, childPrefix.c_str());
+    Long64_t nParent = treeEntriesByPrefix(d, parentPrefix.c_str());
+    if (nChild < 0 || nParent < 0) continue;  // pair not both present
+    if (nChild != nParent) {
+      std::cerr << "  [FAIL] paste-join size mismatch: " << childPrefix << "*"
+                << " has " << nChild << " rows but parent " << parentPrefix << "*"
+                << " has " << nParent << "\n";
+      ok = false;
+    }
+  }
+
+  // ---- Generic fIndex* range check ----
+  // For each table in the DF, scan all fIndex* branches and confirm every
+  // value lies in [-1, nReferent).  This catches stale pointers across
+  // tables (cross-table index drift) which a per-DF-tree-only check misses.
+  TIter it2(d->GetListOfKeys());
+  TKey *k2;
+  while ((k2 = (TKey*)it2())) {
+    TObject *obj = d->Get(k2->GetName());
+    if (!obj || !obj->InheritsFrom(TTree::Class())) continue;
+    TTree *t = (TTree*)obj;
+    for (auto &[branchName, referentPrefix] : kIndexBranchToTable) {
+      if (!t->GetBranch(branchName.c_str())) continue;
+      Long64_t nRef = treeEntriesByPrefix(d, referentPrefix.c_str());
+      if (nRef < 0) continue;   // referent not in this DF; skip silently
+      Long64_t bad = checkIndexRange(t, branchName.c_str(), nRef);
+      if (bad > 0) {
+        std::cerr << "  [FAIL] " << t->GetName() << "." << branchName
+                  << ": " << bad << " value(s) out of range [-1, " << nRef << ")\n";
+        ok = false;
+      }
+    }
+  }
+
   return ok;
 }
 
@@ -1121,7 +1475,9 @@ void AODBcRewriter(const char *inFileName  = "AO2D.root",
 
   std::cout << "AODBcRewriter: input=" << inFileName
             << " output=" << outFileName << "\n";
-
+  if (TString(inFileName).BeginsWith("alien:")) {
+    TGrid::Connect("alien");
+  }
   std::unique_ptr<TFile> fin(TFile::Open(inFileName, "READ"));
   if (!fin || fin->IsZombie()) { std::cerr << "ERROR: cannot open " << inFileName << "\n"; return; }
 

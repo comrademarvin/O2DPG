@@ -34,7 +34,7 @@ if [[ $SYNCMODE == 1 ]] && has_processing_step ENTROPY_ENCODER && [[ ! -z "$WORK
 # for async recalibration
 if has_detector_calib EMC && has_detector_reco EMC && [[ $SYNCMODE != 1 ]]; then CAN_DO_CALIB_EMC_ASYNC_RECALIB=1; else CAN_DO_CALIB_EMC_ASYNC_RECALIB=0; fi
 if [[ $SYNCMODE != 1 ]] && has_detector_reco TPC; then CAN_DO_CALIB_ASYNC_EXTRACTTPCCURRENTS=1; else CAN_DO_CALIB_ASYNC_EXTRACTTPCCURRENTS=0; fi
-if [[ $SYNCMODE != 1 ]] && has_detector_reco TPC && has_detector_reco ITS && has_detector_reco FT0; then CAN_DO_CALIB_ASYNC_EXTRACTTIMESERIES=1; else CAN_DO_CALIB_ASYNC_EXTRACTTIMESERIES=0; fi
+if [[ $SYNCMODE != 1 ]] && has_detector_reco TPC; then CAN_DO_CALIB_ASYNC_EXTRACTTIMESERIES=1; else CAN_DO_CALIB_ASYNC_EXTRACTTIMESERIES=0; fi
 
 # additional individual settings for calibration workflows
 if has_detector CTP; then export CALIB_TPC_SCDCALIB_CTP_INPUT="--enable-ctp"; else export CALIB_TPC_SCDCALIB_CTP_INPUT=""; fi
@@ -199,6 +199,7 @@ fi
 ( [[ -z ${CALIB_TPC_RESPADGAIN:-} ]] || [[ $CAN_DO_CALIB_TPC_RESPADGAIN == 0 ]] ) && CALIB_TPC_RESPADGAIN=0
 ( [[ -z ${CALIB_TPC_IDC:-} ]] || [[ $CAN_DO_CALIB_TPC_IDC == 0 ]] ) && CALIB_TPC_IDC=0
 ( [[ -z ${CALIB_TPC_SAC:-} ]] || [[ $CAN_DO_CALIB_TPC_SAC == 0 ]] ) && CALIB_TPC_SAC=0
+( [[ -z ${CALIB_TPC_CMV:-} ]] || [[ $CAN_DO_CALIB_TPC_CMV == 0 ]] ) && CALIB_TPC_CMV=0
 ( [[ -z ${CALIB_TPC_VDRIFTTGL:-} ]] || [[ $CAN_DO_CALIB_TPC_VDRIFTTGL == 0 ]] ) && CALIB_TPC_VDRIFTTGL=0
 ( [[ -z ${CALIB_TRD_VDRIFTEXB:-} ]] || [[ $CAN_DO_CALIB_TRD_VDRIFTEXB == 0 ]] ) && CALIB_TRD_VDRIFTEXB=0
 ( [[ -z ${CALIB_TRD_GAIN:-} ]] || [[ $CAN_DO_CALIB_TRD_GAIN == 0 ]] ) && CALIB_TRD_GAIN=0
@@ -313,11 +314,12 @@ if [[ -z ${CALIBDATASPEC_TPCIDC_C:-} ]]; then
   # TPC
   if [[ $CALIB_TPC_IDC == 1 ]]; then add_semicolon_separated CALIBDATASPEC_TPCIDC_C "idcsgroupc:TPC/IDCGROUPC"; fi
 fi
+# define spec for proxy for TPC CMVs
 if [[ -z ${CALIBDATASPEC_TPCCMV:-} ]]; then
   # TPC
   if [[ $CALIB_TPC_CMV == 1 ]];  then
-	add_semicolon_separated CALIBDATASPEC_TPCCMV "cmvgroup:TPC/CMVGROUP";
-	add_semicolon_separated CALIBDATASPEC_TPCCMV "cmvorbit:TPC/CMVORBITINFO";
+		add_semicolon_separated CALIBDATASPEC_TPCCMV "cmvgroup:TPC/CMVGROUP";
+		add_semicolon_separated CALIBDATASPEC_TPCCMV "cmvorbit:TPC/CMVORBITINFO";
 	fi
 fi
 
